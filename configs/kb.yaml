@@ -1,0 +1,35 @@
+embeddings:
+  model_name: "pritamdeka/S-PubMedBert-MS-MARCO"
+  device: "cuda"
+  normalize: true
+  batch_size: 32
+
+chunking:
+  chunk_size: 512
+  chunk_overlap: 100
+  splitter: "recursive"
+
+vector_db:
+  backend: "qdrant"
+  collection: "medical_kb"
+  distance: "cosine"
+
+sources:
+  guidelines:
+    - who
+    - cdc
+    - nice
+    - nih
+  datasets:
+    - pubmedqa
+    - medqa
+    - medmcqa
+    - bioasq
+
+trust_scores:
+  who: 0.95
+  cdc: 0.95
+  nice: 0.93
+  nih: 0.93
+  pubmed: 0.80
+  medqa: 0.85

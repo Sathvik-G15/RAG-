@@ -1,0 +1,206 @@
+Capstone Project Proposal Report
+(Individual Report)
+
+CAP4001 – Capstone Project Proposal Report
+
+Student Name         : [Your Name]
+Student Register No  : [Your Reg. No]
+Programme            : B.Tech Computer Science / AI & ML
+Semester/Year        : [Semester], 2026
+Guide(s)             : [Guide Name]
+Project Title        : Confidence-Aware Adaptive Retrieval Clinical Decision Support System (CAAR-CDSS)
+
+Team Composition:
+  Reg. No     | Name              | Major             | Specialization
+  ----------- | ----------------- | ----------------- | ---------------
+  [Reg No 1]  | [Member 1 Name]   | CSE / AI          | AI & Machine Learning
+  [Reg No 2]  | [Member 2 Name]   | CSE / Software    | Software Engineering
+
+Guide Approval (initials/date): _______________
+
+--------------------------------------------------------------------------------
+
+PROJECT AND TASK DESCRIPTION
+
+(a) Project Summary
+--------------------
+CAAR-CDSS is a trustworthy clinical decision support system that uses
+Adaptive Evidence Budgeting (AEB) — a novel iterative retrieval loop that
+expands the evidence budget round-by-round until a calibrated confidence
+threshold (θ) is reached, then abstains rather than hallucinating when the
+corpus cannot ground the answer.
+
+The system addresses three documented gaps in the 2024–2026 clinical-RAG
+literature:
+  1. No standardised hallucination-evaluation protocol (every paper measures
+     differently, making cross-paper comparison impossible).
+  2. Confidence-calibrated abstention is underexplored — most systems always
+     answer, even when evidence is insufficient.
+  3. Single-specialty scope limits generalizable conclusions.
+
+Core pipeline (already implemented):
+  • Hybrid retrieval: dense (BGE-M3) + BM25 fused via Reciprocal Rank Fusion
+  • NLI hallucination verifier: DeBERTa-v3-large-MNLI checks each claim
+  • Confidence calibration: multi-signal fusion (retriever sufficiency +
+    evidence agreement + hallucination penalty) with temperature scaling
+  • Risk-aware triage: hard emergency escalation + soft escalation when
+    evidence budget is exhausted
+  • FastAPI backend, React frontend, MockReasoner for GPU-free testing
+
+Generation LLM: microsoft/Llama3-Med-8B-Instruct (medical-tuned, Llama 3
+Community License — research-clear).
+
+Corpus: epfl-llm/guidelines (48,096 clinical practice guideline articles,
+HuggingFace), spanning multiple clinical specialties (general medical decision support).
+
+Evaluation benchmarks: MedQA (primary), PubMedQA (secondary).
+Evaluation framework: RAGAS (Faithfulness, Answer Relevancy, Context
+Precision, Context Recall) + custom abstention-rate curve sweep.
+
+(b) Individual Role and Specific Tasks
+----------------------------------------
+Member 1 (Research & AI):
+  • Implement OpenSourceLLMReasoner (4-bit NF4 via bitsandbytes) and
+    HFInferenceReasoner (HuggingFace Inference API, zero local VRAM)
+  • Configure RAGAS local judge using HF Inference API
+  • Run MedQA benchmark + abstention-rate threshold sweep on Kaggle T4
+  • Write Methods and Results sections of the IEEE paper
+
+Member 2 (Software & Integration):
+  • Load epfl-llm/guidelines → ChromaDB (persistent vector store)
+  • Wire BGE-M3 embedder (FlagEmbedding)
+  • Add hardware auto-detection (detect_hardware() in src/config.py)
+  • Scaffold Kaggle T4 eval notebook
+  • Complete missing API endpoints and frontend confidence badge
+
+Deliverables:
+  • Working CAAR-CDSS system with real LLM and real corpus
+  • MedQA results table (Vanilla LLM vs Vanilla RAG vs Hybrid RAG vs AEB)
+  • Abstention-accuracy Pareto curve (Figure 1 in the paper)
+  • Embedding model ablation table (BGE-M3 vs MedCPT vs MiniLM)
+  • IEEE conference paper draft (target: IEEE BIBM / ACM CHIL workshop)
+  • GitHub repository + demo video
+
+(c) Approach
+-------------
+Stack (resolved, no open decisions remaining):
+
+  Component          | Choice                                | Reason
+  -------------------| ------------------------------------- | --------------------------------
+  Corpus             | epfl-llm/guidelines (HuggingFace)     | 48K CPG articles, RAG-ready
+  Sub-domain         | General (All clinical specialties)    | Full general medical coverage
+  Vector store       | ChromaDB                              | Persistent, no server needed
+  Embedder           | BGE-M3 (FlagEmbedding)                | Hybrid-native, MIT license
+  Retrieval          | Dense + BM25 via RRF                  | Handles drug names / dosages
+  NLI verifier       | DeBERTa-v3-large-MNLI                 | Claim-level entailment check
+  LLM (local dev)    | Llama3-Med-8B, 4-bit NF4              | Fits RTX 4050 6 GB
+  LLM (paper eval)   | Llama3-Med-8B, fp16 on Kaggle T4      | Free 30h/week GPU
+  RAGAS judge        | Llama3-Med-8B via HF Inference API    | Zero local VRAM, free tier
+  Evaluation         | RAGAS + custom abstention script       | Directly citable in paper
+  Backend            | FastAPI + SQLite (query logs)          | No PostgreSQL setup overhead
+
+Compute strategy (no GPU budget required for paper experiments):
+  • Local RTX 4050 (6 GB): development, unit tests, MockReasoner, smoke tests
+  • Kaggle Notebooks (T4 16 GB, free 30h/week): full MedQA benchmark runs
+  • HuggingFace Inference API (free tier): RAGAS judge calls (~1000 req/day)
+
+(d) Design Phases
+------------------
+Phase 1 — COMPLETE (core pipeline built):
+  AEB loop, hybrid retrieval, NLI verifier, confidence calibration,
+  FastAPI backend, MockReasoner.
+
+Phase 2 — IN PROGRESS (Week 1, this sprint):
+  Real corpus (epfl-llm/guidelines → ChromaDB), BGE-M3 embedder,
+  OpenSourceLLMReasoner (4-bit), HFInferenceReasoner, RAGAS judge,
+  Kaggle notebook template, hardware auto-config.
+
+Phase 3 — Week 2-3:
+  MedQA/PubMedQA loaders, RAGAS pipeline into run_all,
+  abstention-rate threshold sweep, missing API endpoints.
+
+Phase 4 — Weeks 5-6 (Kaggle T4):
+  3 baseline experiments + 2 ablation studies (200-question MedQA).
+
+Phase 5 — Weeks 6-8:
+  IEEE paper writing: Methods → Results → Discussion → Abstract.
+
+--------------------------------------------------------------------------------
+
+OUTCOME MATRIX
+
+Outcome (a) — Mathematics, science, and engineering:
+  Demonstrated via: confidence calibration formulae (retriever sufficiency +
+  evidence agreement + hallucination penalty), temperature scaling, ECE/Brier
+  score measurement, RRF fusion weights, NLI entailment probability thresholds.
+
+Outcome (c) — Design within realistic constraints:
+  Constraints addressed:
+    • Hardware: RTX 4050 (6 GB VRAM) → resolved via 4-bit NF4 quantization
+      and Kaggle T4 for paper experiments (free tier)
+    • Budget: all components are free/open-source (no API cost for eval)
+    • Safety: hard emergency escalation rules + soft abstention below θ
+    • Ethics: no real patient data used (all corpora are public guidelines
+      or de-identified; stated explicitly in §6 of the data governance note)
+    • Time: 8 remaining weeks for real corpus + LLM + paper
+
+Outcome (d) — Multidisciplinary teams:
+  Demonstrated via: two-member team with split AI/Software roles (see §b above),
+  weekly sync checklist, shared GitHub repository with CI tests.
+
+Outcome (e) — Identify, formulate, and solve engineering problems:
+  Problem: 28.6–39.6% hallucination rate in clinical LLMs without retrieval.
+  Formulation: confidence-calibrated AEB with NLI verification.
+  Solution: AEB loop + DeBERTa verifier + abstention rather than hallucination.
+
+Outcome (g) — Communicate effectively:
+  Demonstrated via: IEEE paper draft, architecture diagrams, demo video,
+  evaluation dashboard in the React frontend.
+
+Outcome (k) — Modern engineering tools:
+  PyTorch, HuggingFace transformers, bitsandbytes, FlagEmbedding (BGE-M3),
+  ChromaDB, FastAPI, RAGAS, MLflow, GitHub Actions, Kaggle Notebooks.
+
+--------------------------------------------------------------------------------
+
+REALISTIC CONSTRAINTS
+
+1. Hardware: RTX 4050 with 6 GB VRAM — below all standard LLM serving configs.
+   Mitigation: 4-bit NF4 quantization for local dev (~4.5 GB active VRAM);
+   Kaggle T4 (16 GB, free 30h/week) for paper experiments.
+
+2. Cost: zero API budget for generation or judging.
+   Mitigation: fully open-source model (Llama3-Med-8B); HF Inference API
+   free tier for RAGAS judge (~1000 requests/day, sufficient for 200-sample eval).
+
+3. Time: 8 weeks remaining.
+   Mitigation: core pipeline already built; only real corpus + LLM + eval
+   integration remains; Kaggle handles compute, no cluster provisioning needed.
+
+4. Data: no access to real patient records (MIMIC gated access takes weeks).
+   Mitigation: use epfl-llm/guidelines (public, 48K articles) + MedQA/PubMedQA
+   (public benchmarks). This is explicitly noted in all publications in this space.
+
+5. Safety/Ethics: prototype must not be mistaken for a clinical tool.
+   Mitigation: hard-coded disclaimer in every API response and UI screen;
+   escalation pathway to clinician for every low-confidence output.
+
+--------------------------------------------------------------------------------
+
+ENGINEERING STANDARDS
+
+1. IEEE 7010-2020 (Recommended Practice for Assessing the Impact of Autonomous
+   and Intelligent Systems on Human Well-Being) — guides the abstention mechanism
+   design and the disclaimer requirements.
+
+2. Reproducibility standards: all random seeds pinned in configs/seeds.yaml;
+   library versions locked in requirements.txt; experiment configs version-controlled.
+
+3. RAGAS evaluation framework: directly citable, standardized RAG evaluation —
+   addresses the methodology-inconsistency gap identified in the literature review.
+
+4. Data governance: all corpora are public guidelines or de-identified open-access
+   datasets. No real patient-identifiable data is used at any stage.
+
+5. Software engineering: PEP 8, type hints throughout, pytest coverage for all
+   pipeline modules, GitHub Actions CI on every push.

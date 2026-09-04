@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv pip install -r requirements.txt
+          uv pip install -e .
+
+      - name: Run Ruff linting
+        run: uv run ruff check src/ tests/
+
+      - name: Run Pyright type checking
+        run: uv run pyright src/ tests/
+
+      - name: Run pytest (mock mode, no GPU)
+        run: uv run pytest tests/ -v --tb=short
+
+      - name: Validate HF Token access (if provided)
+        if: env.HF_TOKEN != ''
+        run: |
+          python -c "
+          from huggingface_hub import HfApi
+          api = HfApi(token='${{ secrets.HF_TOKEN }}')
+          user = api.whoami()
+          print(f'✅ HF Token valid for user: {user[\"name\"]}')
+          # Check gated dataset access
+          try:
+              api.dataset_info('bigbio/med_qa')
+              print('✅ Access to bigbio/med_qa confirmed')
+          except Exception as e:
+              print(f'⚠️ Cannot access bigbio/med_qa: {e}')
+          "
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            .pytest_cache/
+            **/*.pyc

@@ -1,0 +1,434 @@
+RAG-Based Clinical Decision Support / Triage Assistant
+Complete Capstone Project Document
+[UPDATED: Sep 2026 — reflects resolved hardware, LLM stack, and compute strategy]
+
+================================================================================
+1. Literature Review (2020–2026)
+================================================================================
+
+Foundational RAG (2020). Lewis et al. (2020, NeurIPS) introduced retrieval-augmented
+generation for knowledge-intensive NLP tasks — the base architecture (retriever +
+generator) nearly all later clinical-RAG work extends.
+
+Hallucination as the core motivating problem (2023–2024). Clinical-LLM literature is
+unusually explicit about the stakes: prior studies reported hallucination rates of
+28.6–39.6% in medical-specialized models without retrieval grounding. This is the
+direct justification for why RAG (not a bare LLM) is the right architecture for
+clinical decision support.
+
+Domain-grounded RAG systems (2024). Guideline-grounded systems emerged across
+specialties (hepatology, ophthalmology, radiology) — consistently showing that
+narrow, specialty-specific grounding reduces hallucination substantially, but each
+system was built and evaluated in isolation with inconsistent methodology.
+
+Architecture sophistication (2024–2025). Hybrid RAG combining dense and sparse
+retrieval with reciprocal rank fusion, and knowledge-graph-enhanced retrieval over
+UMLS (a ~3M-node clinical concept graph) represent the current state of the art.
+Privacy-preserving, on-premises deployment variants ("MediRAG") address
+institutional data-residency requirements.
+
+Quantified hallucination-reduction results (2025). A radiology contrast-media
+consultation study found complete elimination of hallucinations (reducing incidence
+from 8% to 0%) when using a RAG-enhanced local LLM compared to the ungrounded
+baseline — a strong, citable, concrete result for evaluation framing.
+
+RAG vs. fine-tuning debate (2025). A systematic review concluded RAG is generally the
+more resource-efficient and scalable approach for medical LLM deployment, since
+fine-tuning requires substantial compute and annotated data often unavailable in
+clinical settings.
+
+Evaluation methodology remains the weak point (2024–2026). Work on "Ranking Over
+Scoring" (COLING 2025) argues for more reliable automated evaluation of LLM-
+generated medical explanations. Across nearly every paper reviewed, hallucination-
+rate measurement methodology differs (human review vs. automated fact-checking
+vs. LLM-as-judge), making cross-paper comparison unreliable.
+
+Summary Table
+  Period     | Focus                    | Key contribution
+  -----------|--------------------------|----------------------------------------------
+  2020       | Foundational architecture | RAG introduced for knowledge-intensive NLP
+  2023–2024  | Problem motivation        | Hallucination rates 28.6–39.6% documented
+  2024       | Domain-grounded systems   | Specialty-specific guideline-grounded RAG
+  2024–2025  | Architecture              | Hybrid dense+sparse; UMLS knowledge-graph RAG
+  2025       | Quantified results        | RAG reduces hallucination 8% → 0% (radiology)
+  2025       | RAG vs fine-tuning        | RAG favored for resource-constrained settings
+  2024–2026  | Evaluation gap            | No standardized hallucination-measurement methodology
+
+================================================================================
+2. Research Gap Analysis
+================================================================================
+
+1. No standardized, reproducible hallucination-evaluation protocol. Every paper
+   measures hallucination differently — this is explicitly flagged across multiple
+   2024–2026 sources.
+
+2. Confidence-calibrated abstention is underexplored. Most systems always answer;
+   very few explicitly detect low-retrieval-confidence situations and abstain or flag
+   uncertainty — a real patient-safety gap, since a confidently wrong answer is more
+   dangerous than "I'm not sure, consult a specialist."
+
+3. Narrow, single-specialty focus limits generalizable conclusions. Existing systems
+   are each built and evaluated in isolation.
+
+Novelty claim: a guideline-grounded RAG assistant with confidence-calibrated
+abstention (Adaptive Evidence Budgeting), evaluated using a rigorous, reproducible
+hallucination-measurement protocol combining RAGAS automated fact-checking
+and structured human review — directly addressing the methodology-inconsistency
+gap while adding a genuine safety mechanism most existing systems lack.
+
+================================================================================
+3. Existing Solutions Comparison
+================================================================================
+
+  System/Approach                      | Strength                           | Weakness (our opening)
+  -------------------------------------|------------------------------------|-----------------------------------------
+  Vanilla LLM (no retrieval)           | Simple, fast                       | 28.6–39.6% hallucination rate — unsafe
+  Hepatology/Ophthalmology RAG (2024)  | Strong specialty hallucination cut  | Narrow scope, no abstention mechanism
+  Hybrid dense+sparse + UMLS KG RAG   | State-of-the-art retrieval          | Too complex for 3–4 month timeline
+  MediRAG (privacy-preserving)         | Addresses data-residency            | Privacy focus, not abstention/eval rigor
+  Fine-tuned medical LLM (no RAG)     | Strong on narrow diagnostic tasks   | Needs substantial compute/annotated data
+
+Recommendation implemented: Advanced RAG (hybrid + rerank) with a
+corrective/abstention (AEB) layer, using ChromaDB + BGE-M3, no knowledge
+graph (not our novelty axis and would eat our timeline).
+
+================================================================================
+4. Novel Contribution
+================================================================================
+
+"Confidence-Calibrated Retrieval-Augmented Generation for Safe Clinical
+Decision Support via Adaptive Evidence Budgeting"
+
+The AEB loop iteratively retrieves document batches (initial_k=3, step_k=3,
+max_k=15) until confidence ≥ θ, then abstains rather than hallucinating when
+the corpus cannot ground the answer. The confidence score is a multi-signal
+fusion: retriever sufficiency + evidence agreement + hallucination penalty
+(DeBERTa-v3-MNLI NLI check), calibrated via temperature scaling.
+
+This is evaluated via:
+  (a) RAGAS automated metrics (Faithfulness, Answer Relevancy, Context
+      Precision, Context Recall) — directly citable against published RAG papers
+  (b) Custom abstention-rate curve: sweep θ ∈ {0.5, 0.6, ..., 0.9} and plot
+      the precision/coverage Pareto curve — this is the key novel result figure
+
+================================================================================
+5. Patentability Analysis
+================================================================================
+
+Low patentability — this is a pure publication play. Confidence-thresholded
+abstention is not novel in the abstract; the novelty is in application to clinical
+abstention and the evaluation rigor. No patent path — focus entirely on
+making the evaluation methodology rigorous enough to be genuinely citable.
+
+================================================================================
+6. Complete System Architecture
+================================================================================
+
+Patient Input (Symptoms + Profile)
+        │
+        ▼
+Preprocessing & Feature Builder
+        │
+        ▼
+AEB Loop ──────────────────────────────────────────────┐
+        │                                               │
+        ▼                                               │
+Hybrid Retriever (BGE-M3 + BM25 + RRF)                 │
+        │                                               │
+        ▼                                               │
+NLI Hallucination Verifier (DeBERTa-v3-MNLI)           │
+        │                                               │
+        ▼                                               │
+Confidence Estimator (multi-signal fusion)              │
+        │                                               │
+        ├── confidence ≥ θ ──────────────────────────►  │
+        │                                         LLM Reasoner
+        │                                         (Llama3-Med-8B)
+        │                                               │
+        └── confidence < θ → retrieve more ────────────┘
+                  (until max_k, then ABSTAIN)
+
+        ▼
+Decision Module
+  ├── ANSWER (confidence ≥ θ, evidence cited)
+  ├── ASK FOLLOW-UP (moderate confidence)
+  └── ESCALATE (low confidence OR hallucination detected)
+
+LLM Stack (resolved):
+  • Local dev (RTX 4050 6 GB): Llama3-Med-8B, 4-bit NF4, ~4.5 GB VRAM
+  • Paper experiments (Kaggle T4 16 GB): Llama3-Med-8B, fp16, max quality
+  • RAGAS judge (zero local VRAM): Llama3-Med-8B via HF Inference API (free)
+
+================================================================================
+7. Database Schema
+================================================================================
+
+SQLite (query logs — no PostgreSQL setup overhead for research prototype):
+
+  GUIDELINE_DOCUMENT: doc_id PK, title, specialty, source_url, publication_date
+  CHUNK:              chunk_id PK, doc_id FK, content (text), embedding (vector), metadata
+  QUERY:              query_id PK, query_text, confidence_score, abstained (bool), asked_at
+  RETRIEVED_CHUNK:    id PK, query_id FK, chunk_id FK, relevance_score, retrieval_round
+  RESPONSE:           response_id PK, query_id FK, answer_text, cited_chunk_ids (json),
+                      human_reviewed, hallucination_flagged, reviewer_notes
+  EVAL_RUN:           eval_id PK, benchmark_name, hallucination_rate, abstention_rate,
+                      ragas_faithfulness, ragas_answer_relevancy, context_precision,
+                      context_recall, run_at
+
+ChromaDB (vector store — persistent, no external server):
+  Collection: guideline_chunks — stores embeddings + metadata per chunk
+
+================================================================================
+8. API Design
+================================================================================
+
+  Method | Endpoint                    | Purpose
+  -------|-----------------------------|-----------------------------------------
+  POST   | /auth/login                 | JWT authentication
+  POST   | /guidelines/upload          | Ingest a new guideline document
+  POST   | /query                      | Submit clinical question → grounded answer
+                                        + citations OR abstention flag
+  GET    | /query/{id}                 | Retrieve past query response + chunks
+  POST   | /evaluation/run             | Trigger benchmark eval run (MedQA subset)
+  GET    | /evaluation/{id}/results    | Fetch hallucination-rate, abstention-rate,
+                                        RAGAS scores
+  POST   | /review/{response_id}       | Submit human-review annotation
+  GET    | /corpus/stats               | Corpus size, specialty coverage, chunk count
+
+All above are implemented or in Sprint 2 scope.
+
+================================================================================
+9. Frontend
+================================================================================
+
+React + Tailwind. Key screens:
+  (1) Query input with patient context fields
+  (2) Answer with inline citations linked to source chunks
+  (3) Confidence badge — the MOST IMPORTANT UI element:
+      🟢 High confidence (≥ θ): evidence cited, answer displayed
+      🟡 Moderate confidence: answer + "consider follow-up" prompt
+      🔴 Low confidence: "⚠ Insufficient grounding — consult a specialist"
+  (4) Researcher/Evaluation Dashboard: hallucination rate, abstention rate,
+      RAGAS scores, retrieval stats
+
+================================================================================
+10. Backend Architecture (Modular Monolith)
+================================================================================
+
+One deployable FastAPI app with internal modules:
+
+  ┌─────────────────────────────────────────────────┐
+  │  src/                                           │
+  │  ├── api/          FastAPI endpoints            │
+  │  ├── agents/       LLM reasoners (mock/local/HF)│
+  │  ├── confidence/   AEB loop + calibration       │
+  │  ├── retrieval/    Hybrid dense+BM25+RRF        │
+  │  ├── verification/ DeBERTa NLI verifier         │
+  │  ├── kb/           ChromaDB + BGE-M3 embedder   │
+  │  ├── data/         Corpus loaders + benchmarks  │
+  │  └── experiments/  Runner + RAGAS eval          │
+  └─────────────────────────────────────────────────┘
+
+================================================================================
+11. AI/ML Model Design (Updated — Resolved)
+================================================================================
+
+Retriever:
+  BGE-M3 (FlagEmbedding) — hybrid-native (dense + sparse + multi-vector
+  in one model). MIT license. Free, self-hostable.
+
+NLI Verifier:
+  DeBERTa-v3-large-MNLI — claim-level entailment checking.
+  Threshold: entailment probability > 0.7.
+
+Generation LLM — three serving backends, auto-selected by detect_hardware():
+
+  Backend           | Hardware            | Quantization | max_new_tokens
+  ------------------|---------------------|--------------|---------------
+  local_4bit        | RTX 4050 (6 GB)     | 4-bit NF4    | 256
+  kaggle_fp16       | Kaggle T4 (16 GB)   | fp16         | 512
+  hf_inference_api  | HF managed (cloud)  | managed      | 256
+
+  Hardware auto-config table:
+    ≥ 20 GB VRAM → kaggle_fp16
+    10–19 GB     → local_4bit (fp16-capable but conservative)
+    < 10 GB      → local_4bit + RAGAS via hf_inference_api
+    No GPU       → hf_inference_api for all calls
+
+RAGAS Judge:
+  Same model (Llama3-Med-8B-Instruct) via HuggingFace Inference API.
+  Uses LangchainLLMWrapper + HuggingFaceEndpoint.
+  Free tier: ~1000 requests/day — sufficient for 200-sample MedQA eval.
+  Zero additional VRAM cost.
+
+Confidence Scorer:
+  Multi-signal fusion:
+    confidence = w1 * retriever_sufficiency
+               + w2 * evidence_agreement
+               - w3 * hallucination_penalty
+  Calibrated via temperature scaling. ECE measured on validation set.
+
+Abstention threshold (θ):
+  Treated as an experimental variable. Report the precision/coverage
+  tradeoff curve (θ sweep ∈ {0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9})
+  not a single fixed number. This Pareto curve is Figure 1 in the paper.
+
+================================================================================
+12. Dataset Recommendations (Resolved)
+================================================================================
+
+  Dataset/Corpus             | Use                | Status
+  ---------------------------|--------------------|--------------------
+  epfl-llm/guidelines        | Grounding corpus   | ← PRIMARY (Sprint 1)
+  (48,096 CPG articles,      | (All clinical      |
+  HuggingFace)               |  specialties)      |
+  MedQA (USMLE-style)        | Primary eval bench | ← Sprint 3
+  PubMedQA                   | Secondary bench    | ← Sprint 3
+  MedHALT                    | Hallucination-spec | Optional add-on
+  MultiCaRe                  | Qualitative cases  | Paper case studies
+
+Scope: General clinical practice guidelines across all major specialties (internal medicine,
+cardiology, oncology, pediatrics, infectious diseases, etc.) — provides strong cross-domain
+generalization for clinical decision support.
+
+Data governance: all corpora are public guidelines or de-identified open-access
+datasets. No real patient-identifiable data used anywhere. This is stated
+explicitly in every submitted version of the paper and proposal.
+
+================================================================================
+13. Evaluation Metrics (Resolved Protocol)
+================================================================================
+
+RAGAS metrics (via HF Inference API judge):
+  • Faithfulness — are claims grounded in retrieved chunks?
+  • Answer Relevancy — does the answer address the query?
+  • Context Precision — are retrieved chunks actually relevant?
+  • Context Recall — were all relevant chunks retrieved?
+
+Custom metrics:
+  • Hallucination rate: % of answered responses with ≥1 unsupported claim
+    (DeBERTa NLI verifier + spot human review)
+  • Abstention rate: % of queries where system declines to answer
+    (reported as Pareto curve with accuracy, not a single number)
+  • Citation accuracy: % of cited sources that genuinely support the claim
+  • Abstention-accuracy Pareto curve: sweep θ, plot (accuracy, abstention_rate,
+    hallucination_rate) — this is the key novel result figure
+
+Baselines:
+  1. Vanilla LLM (no retrieval)
+  2. Vanilla RAG (fixed top-5)
+  3. Hybrid RAG (dense + BM25 + RRF, no abstention)
+  4. AEB / Full System (ours)
+
+================================================================================
+14. Implementation Plan (Revised — 8 weeks remaining)
+================================================================================
+
+  Week | Milestone
+  -----|------------------------------------------------------------------
+  1    | Sprint 1: epfl-llm corpus → ChromaDB, BGE-M3, OpenSourceLLMReasoner
+       |   (4-bit NF4), HFInferenceReasoner, RAGAS judge (HF API),
+       |   detect_hardware(), Kaggle notebook template
+  2    | Sprint 2: Missing API endpoints (upload, query-log, eval-run,
+       |   review, corpus-stats)
+  3    | Sprint 3: MedQA + PubMedQA loaders, RAGAS wired into run_all,
+       |   abstention-rate curve sweep
+  4    | Sprint 4: Frontend confidence badge | Sprint 5: Drug Safety Agent
+  5    | Kaggle T4: 3 baseline experiments + 2 ablation studies
+       |   (200-question MedQA, full RAGAS eval)
+  6    | Write Methods + Results sections; generate all paper figures
+  7    | Write Discussion + Introduction + Abstract
+  8    | IEEE formatting, GitHub cleanup, demo video, conference selection
+
+Compute strategy for paper experiments (Week 5):
+  Upload repo to Kaggle → run notebooks/kaggle_eval_template.ipynb on T4
+  → download results CSV → generate figures locally.
+  No local GPU required for paper results.
+
+================================================================================
+15. Team Task Allocation (Remaining 8 Weeks)
+================================================================================
+
+  Week | Member 1 (Research & AI)                  | Member 2 (Software & Integration)
+  -----|-------------------------------------------|-------------------------------------------
+  1    | OpenSourceLLMReasoner + HFInferenceReasoner| ChromaDB + BGE-M3 + epfl-llm loader
+  1    | RAGAS eval script + HF API judge config    | Kaggle notebook + detect_hardware()
+  2    | MedQA + PubMedQA benchmark loaders         | Missing API endpoints
+  3    | Abstention-rate curve sweep implementation | RAGAS pipeline wired into run_all
+  4    | Drug Safety Agent (optional)               | Frontend confidence badge + corpus stats
+  5    | Kaggle: 3 baseline experiments             | Kaggle: 2 ablation studies
+  6    | Write Methods section                      | Results tables + Figures 1 & 2
+  7    | Write Discussion + Introduction            | Abstract + format references
+  8    | IEEE formatting + final review             | GitHub cleanup + demo video + PPT
+
+================================================================================
+16. IEEE / ACM / Springer Conference Targets
+================================================================================
+
+  • IEEE BIBM (Bioinformatics and Biomedicine) — direct fit
+  • IEEE ICHI (International Conference on Healthcare Informatics) — direct fit
+  • ACM CHIL (Conference on Health, Inference, and Learning) — workshop track
+  • Springer LNCS/LNAI volumes on medical NLP / clinical AI
+  • JMIR AI — if result quality warrants journal submission
+
+Action: verify live CFPs/deadlines 2–3 months before Week 8 target.
+
+================================================================================
+17. Resume Impact
+================================================================================
+
+Bullet (example):
+  "Built CAAR-CDSS — a guideline-grounded RAG clinical assistant with
+  Adaptive Evidence Budgeting (AEB), reducing hallucination rate to X% vs.
+  Y% for ungrounded baseline. Evaluated using RAGAS + a reproducible
+  abstention-rate curve protocol. Stack: HuggingFace Llama3-Med-8B (4-bit
+  NF4 locally, fp16 on Kaggle T4), BGE-M3, ChromaDB, DeBERTa NLI."
+
+Why this lands: RAG/LLM-grounding skills are currently the hottest applied-AI
+competency. "Confidence-calibrated abstention" signals safety-conscious AI
+engineering. A reproducible evaluation protocol (not just "I built a chatbot")
+is what separates an interview-worthy project from a weekend hackathon demo.
+
+================================================================================
+18. Interview Questions Prep
+================================================================================
+
+1. Why RAG instead of fine-tuning for this use case?
+2. How does your AEB loop decide when to stop retrieving vs. abstain?
+3. Walk through your NLI-based hallucination verifier — where does it fail?
+4. What's the difference between retrieval-similarity confidence and
+   multi-signal fusion — why combine both?
+5. How did you validate that your RAGAS/automated hallucination metric
+   is trustworthy (inter-rater agreement with human review)?
+6. What happens when the guideline corpus itself is outdated or wrong?
+7. How would you handle multi-turn clinical conversations?
+8. What are the real deployment blockers between this prototype and actual
+   clinical use (regulatory, liability, EHR integration)?
+9. Why Kaggle T4 instead of a local GPU for paper experiments?
+   (Answer: RTX 4050 is 6 GB — below minimum for fp16 8B models;
+    Kaggle provides 16 GB T4 for free, 30h/week.)
+10. Why the same model for generation and RAGAS judging?
+    (Answer: reuse loaded weights — zero extra VRAM cost on 6 GB.)
+
+================================================================================
+19. Future Work / Startup Opportunities
+================================================================================
+
+Near-term future work (mention in paper Discussion):
+  • RL policy for adaptive retrieval (replace rule-based AEB with PPO-trained agent)
+  • Multi-turn clinical conversation support
+  • MIMIC-IV validation (requires IRB approval)
+  • Extend to additional sub-domains (cardiology, oncology)
+
+Startup/commercialization angle:
+  • B2B health-AI infrastructure: license the confidence-calibrated RAG +
+    evaluation framework to health-AI vendors — the evaluation rigor itself
+    is a sellable asset since the field's biggest weakness is inconsistent evaluation
+  • Realistic first customer: medical education platforms or clinical-decision-
+    support vendors (lower regulatory burden than direct patient-facing deployment)
+  • Caution: direct clinical deployment requires regulatory clearance (Software as
+    a Medical Device) — realistic path is "clinician-support tool, multi-year path
+    to regulated deployment," not immediate consumer product
+
+================================================================================
+[End of Document]

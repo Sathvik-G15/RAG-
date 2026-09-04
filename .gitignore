@@ -1,0 +1,72 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data & models
+data/raw/
+data/processed/
+data/embeddings/
+*.bin
+*.pt
+*.pth
+*.safetensors
+models/
+checkpoints/
+
+# Vector DB & Storage
+.qdrant/
+qdrant_storage/
+*.qdrant
+data/chroma_db/
+data/chroma_test/
+*.sqlite3
+*.sqlite
+*.db
+
+# Logs
+logs/
+*.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.next/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+secrets/
+
+# Experiments output
+experiments/runs/
+experiments/results/*.csv
+experiments/results/*.json
+!experiments/results/.gitkeep
+
+# Paper
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.synctex.gz
+paper/*.out
+paper/*.toc

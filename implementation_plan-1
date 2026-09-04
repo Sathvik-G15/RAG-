@@ -1,0 +1,266 @@
+# CAAR-CDSS Completion Plan
+
+> **Ground truth**: Core pipeline (AEB, hybrid retrieval, verification, triage, API) is ✅ done.
+> What's missing is the **real corpus**, **real benchmarks**, **RAGAS eval**, and the **paper experiments**.
+
+---
+
+# Phase 1 — System Completion
+*Goal: A fully functional system that can actually be evaluated for a paper.*
+
+---
+
+## Sprint 1 — Real Knowledge Base & Corpus
+**Priority: 🔴 Critical (everything downstream depends on this)**
+
+### 1.1 Load the `epfl-llm/guidelines` corpus (HuggingFace)
+The PDFs explicitly recommend this as the primary corpus (48K clinical guideline articles).
+
+```python
+# pip install datasets
+from datasets import load_dataset
+ds = load_dataset("epfl-llm/guidelines", split="train")
+```
+
+- **File to modify**: [`src/data/seed_corpus.py`](file:///e:/Sathvik/programming/Capstone/src/data/seed_corpus.py) — replace seed data with a loader for this dataset
+- Alternatively, create `src/data/guidelines_loader.py` to load + stream chunks into the KB
+- Filter to one clinical sub-domain first (e.g., primary care / infectious disease) to keep it manageable
+
+### 1.2 Swap vector store to ChromaDB
+The in-memory store is fine for CI but won't persist or scale to real guidelines.
+
+- **File to modify**: [`src/kb/vector_store.py`](file:///e:/Sathvik/programming/Capstone/src/kb/vector_store.py) — add `ChromaVectorStore` backend
+- Keep the in-memory backend for tests; use Chroma for real runs
+- Update [`src/confidence/pipeline.py`](file:///e:/Sathvik/programming/Capstone/src/confidence/pipeline.py) `from_seed()` → add `from_corpus()` factory
+
+### 1.3 Wire real embedder (BGE-M3)
+The PDFs recommend BGE-M3 as the best open-source embedding model for this task.
+
+```bash
+pip install FlagEmbedding
+```
+
+- **File to modify**: [`src/kb/embedder.py`](file:///e:/Sathvik/programming/Capstone/src/kb/embedder.py) — add `BGE_M3Embedder` class
+- This is the embedder to use in ablation experiments (generalist vs. domain-specific)
+
+**Deliverable**: `python -m src.cli ingest --corpus epfl-llm/guidelines --domain infectious_disease` works.
+
+---
+
+## Sprint 2 — Missing API Endpoints
+**Priority: 🟡 Important (needed for a complete demo)**
+
+The PDFs specify these endpoints that don't exist yet:
+
+| Endpoint | Purpose | File |
+|---|---|---|
+| `POST /guidelines/upload` | Ingest a PDF/text document at runtime | [`src/api/app.py`](file:///e:/Sathvik/programming/Capstone/src/api/app.py) |
+| `GET /query/{id}` | Retrieve a past query's response | Same |
+| `POST /evaluation/run` | Trigger a benchmark eval run via API | Same |
+| `GET /evaluation/{id}/results` | Fetch eval results | Same |
+| `POST /review/{response_id}` | Human annotation endpoint | Same |
+| `GET /corpus/stats` | Corpus size, chunk count, specialty coverage | Same |
+
+- The `/feedback` endpoint already exists — extend it to cover the human review case
+- For `/query/{id}`: requires a simple query log (in-memory dict or SQLite is fine — no need for full PostgreSQL yet)
+
+**Deliverable**: All 8 endpoints documented and functional (mock or real).
+
+---
+
+## Sprint 3 — Evaluation Infrastructure
+**Priority: 🔴 Critical for paper**
+
+### 3.1 Load MedQA benchmark
+This is the primary accuracy benchmark used across all the literature you're comparing against.
+
+```python
+from datasets import load_dataset
+medqa = load_dataset("bigbio/med_qa", split="test")
+```
+
+- Create `src/data/benchmarks.py` with loaders for MedQA, PubMedQA
+- Extend [`src/experiments/runner.py`](file:///e:/Sathvik/programming/Capstone/src/experiments/runner.py) to accept a benchmark dataset (it currently only works on the seed queries dict format)
+
+### 3.2 Integrate RAGAS
+The PDFs call this out explicitly as the evaluation framework to use (directly comparable to published RAG papers).
+
+```bash
+pip install ragas
+```
+
+RAGAS metrics to collect:
+- **Faithfulness** — are claims grounded in retrieved chunks? (complements your existing `hallucination_score`)
+- **Answer Relevancy** — does the answer address the query?
+- **Context Precision** — are retrieved chunks actually relevant?
+- **Context Recall** — were all relevant chunks retrieved?
+
+Create `src/experiments/ragas_eval.py` to wrap RAGAS around the existing pipeline.
+
+### 3.3 Abstention-Rate Curve
+This is the **key novel contribution** per the PDFs — it's not just reporting a single escalation rate, but plotting the precision/coverage tradeoff as the confidence threshold varies.
+
+- Extend `runner.py` to sweep `confidence_threshold` from 0.5 → 0.95
+- Record (threshold, accuracy, abstention_rate, hallucination_rate) at each point
+- Output a CSV → matplotlib plot
+
+**Deliverable**: `python -m src.experiments.run_all --benchmark medqa` produces a results table + abstention curve plot.
+
+---
+
+## Sprint 4 — Frontend Polish
+**Priority: 🟢 Nice-to-have for demo**
+
+The PDFs specifically say the **abstention/confidence indicator is the most important UI element** — it's what visually proves your novel contribution to reviewers.
+
+- **File**: [`frontend/src/pages/`](file:///e:/Sathvik/programming/Capstone/frontend/src/pages) — add a confidence badge/indicator
+  - 🟢 Green banner: high confidence, evidence cited
+  - 🟡 Yellow banner: moderate confidence, ask follow-up
+  - 🔴 Red banner: low confidence, "Insufficient grounding — consult a specialist"
+- Show which sources were used and their trust scores
+- Add the `/corpus/stats` view to the UI
+
+**Deliverable**: Demo-ready frontend where the abstention behavior is visually obvious.
+
+---
+
+## Sprint 5 — Drug Safety Agent (Optional but good for thesis)
+**Priority: 🟢 Optional**
+
+The docs specify a Drug Safety Agent as one of the 4 multi-agents. You can add a lightweight version:
+
+- Create `src/agents/drug_safety.py`
+- Check `patient.medications` and `patient.allergies` against retrieved drug interaction chunks
+- Flag contraindications in the `ClinicalResponse`
+
+This closes the multi-agent architecture gap from the docs without needing a full framework.
+
+---
+
+# Phase 2 — Paper Completion
+*Goal: IEEE/ACM conference-ready paper.*
+
+---
+
+## Paper Section Order (write in this order — not the reading order)
+
+```
+Methods → Results → Discussion → Introduction → Abstract
+```
+
+---
+
+## Step 1 — Run the 3 Baseline Experiments
+**These are the core results table of your paper.**
+
+The experiment runner already supports all three methods:
+
+| Experiment | How | What to measure |
+|---|---|---|
+| **Vanilla RAG** | `run_all(..., method="vanilla")` | Accuracy, hallucination, latency |
+| **Hybrid RAG** | `run_all(..., method="hybrid")` | Same |
+| **AEB (Full System)** | `run_all(..., method="aeb")` | Same + abstention rate, avg retrieval steps |
+
+Run on **MedQA** (primary) and **PubMedQA** (secondary).
+
+Expected result: AEB should show lower hallucination + better calibration at the cost of slightly higher latency.
+
+---
+
+## Step 2 — Run 2 Ablation Studies
+**Ablations are what turn a system paper into a research paper.**
+
+### Ablation A — Confidence Threshold Sweep
+- Vary `confidence_threshold` ∈ {0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9}
+- Plot: threshold vs. (accuracy, abstention_rate, hallucination_rate)
+- **This is your key result figure** — the Pareto curve between coverage and safety
+
+### Ablation B — Embedding Model Comparison
+- Run retrieval with: Mock → all-MiniLM-L6 → BGE-M3 → MedCPT
+- Measure: Context Precision (RAGAS) + Accuracy
+- **Counter-intuitive expected finding**: BGE-M3 (generalist) likely beats MedCPT (medical-specific) — the PDFs cite multiple papers confirming this. Reporting this in your paper is a genuinely interesting result.
+
+---
+
+## Step 3 — Write Methods Section
+Write while the implementation is fresh. Key things to describe precisely:
+
+1. **AEB Loop** — the iterative confidence-gated retrieval (your primary contribution). Include the pseudocode/algorithm box.
+2. **Confidence Fusion Formula** — the weighted combination of retriever sufficiency + evidence agreement + hallucination penalty (already in [`estimation.py`](file:///e:/Sathvik/programming/Capstone/src/confidence/estimation.py))
+3. **Hallucination Verification** — the LexicalVerifier + DeBERTa pipeline (already in [`verifier.py`](file:///e:/Sathvik/programming/Capstone/src/verification/verifier.py))
+4. **Hybrid Retrieval** — Dense (BGE-M3) + BM25 fused via RRF + patient-specific boosting (already in [`hybrid.py`](file:///e:/Sathvik/programming/Capstone/src/retrieval/hybrid.py))
+
+Use this framing from the PDFs:
+> *"We adapt Corrective RAG principles for clinical abstention — rather than falling back to web search, insufficient confidence triggers controlled escalation to a clinician."*
+
+---
+
+## Step 4 — Write Results Section
+Structure around these tables/figures:
+
+**Table 1: Main comparison**
+| Method | Top-1 Acc | Halluc Rate | Abstention Rate | Avg Retrieval k | Latency |
+|---|---|---|---|---|---|
+| Vanilla LLM | | | — | — | |
+| Vanilla RAG | | | — | 5 | |
+| Hybrid RAG | | | — | 10 | |
+| AEB (Ours) | | | % | adaptive | |
+
+**Figure 1: Abstention-accuracy tradeoff curve** (threshold sweep)
+
+**Table 2: Ablation — embedding model**
+| Embedder | Context Precision | Top-1 Acc |
+|---|---|---|
+| all-MiniLM-L6 | | |
+| BGE-M3 | | |
+| MedCPT | | |
+
+**Figure 2: AEB confidence curve** (confidence per retrieval round, showing convergence)
+
+---
+
+## Step 5 — Write Discussion
+3 paragraphs:
+1. **What the results mean** — AEB reduces hallucination because it only answers when confident; the abstention-accuracy curve shows you can tune safety vs. coverage
+2. **The embedding counter-finding** — if generalist beats specialist, discuss why (instruction-tuned retrievers, training data scale)
+3. **Limitations** — mock LLM in current evaluation; seed corpus size; no MIMIC validation; future work = RL policy, real LLM integration
+
+---
+
+## Step 6 — Write Introduction + Abstract (last)
+By this point you have your results, so the abstract writes itself:
+
+> *"We present CAAR-CDSS, a confidence-calibrated retrieval-augmented clinical decision support system that adaptively expands its evidence budget until a confidence threshold is reached, then abstains rather than hallucinating. On MedQA, our system achieves X% accuracy with a Y% hallucination rate and Z% abstention rate, compared to W% hallucination for vanilla RAG..."*
+
+---
+
+## Timeline Summary
+
+```
+Week 1   Sprint 1: Real corpus + ChromaDB + BGE-M3
+Week 2   Sprint 2: Missing API endpoints
+Week 3   Sprint 3: MedQA + RAGAS + Abstention curve
+Week 4   Sprint 4: Frontend polish  |  Sprint 5: Drug agent (optional)
+Week 5   Run all 3 baseline experiments + 2 ablations
+Week 6   Write Methods + Results
+Week 7   Write Discussion + Introduction + Abstract
+Week 8   Internal review → submit
+```
+
+---
+
+## Open Questions (decide before starting)
+
+> [!IMPORTANT]
+> **Which clinical sub-domain to focus on?**
+> The PDFs strongly recommend scoping to ONE domain (e.g., infectious disease, primary care triage). Trying to cover all of medicine will hurt retrieval precision. This choice affects everything — corpus filtering, evaluation queries, paper framing.
+
+> [!IMPORTANT]
+> **Which LLM will you use for the real mode?**
+> Current code defaults to the mock reasoner. For paper results you need either a GPT-4/Claude API key or a local open-source model (Meditron, BioMistral). Which do you have access to?
+
+> [!WARNING]
+> **RAGAS requires an LLM-as-judge internally** (it calls an LLM to score faithfulness). This costs API tokens. Budget this before wiring it in.
+
+> [!NOTE]
+> **PostgreSQL is optional for a research prototype.** SQLite for query logs + ChromaDB for vectors is a perfectly valid research stack. Don't let the DB setup become a time sink.

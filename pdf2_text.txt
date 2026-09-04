@@ -1,0 +1,386 @@
+Complete Technical Stack Guide
+RAG-Based Clinical Decision Support / Triage Assistant
+[UPDATED: Sep 2026 — all stack decisions resolved for RTX 4050 (6 GB) + Kaggle T4 + HF Inference API]
+
+================================================================================
+RESOLVED STACK SUMMARY (skip to §12 for the full table)
+================================================================================
+
+  Layer              | CHOSEN                              | Reason
+  -------------------|-------------------------------------|-----------------------------------
+  RAG architecture   | Advanced RAG + AEB abstention layer | Best accuracy/safety tradeoff
+  Embedder           | BGE-M3 (FlagEmbedding)              | Hybrid-native, MIT, free
+  Chunking           | Structure-aware + sentence-window   | Matches guideline doc structure
+  Retrieval fusion   | Dense + BM25 via RRF                | Drug names/dosages need exact match
+  Reranker           | BGE-reranker (open-source)          | No API cost; test on your corpus
+  Generation LLM     | Llama3-Med-8B-Instruct              | Medical-tuned, fits 6 GB at 4-bit
+  LLM (local dev)    | 4-bit NF4 via bitsandbytes          | ~4.5 GB VRAM — fits RTX 4050
+  LLM (paper eval)   | fp16 on Kaggle T4 (free)            | 16 GB VRAM, 30h/week free
+  RAGAS judge        | Same model via HF Inference API     | Zero local VRAM, free tier
+  Orchestration      | Custom code (no framework)          | Precise Methods section control
+  Vector DB          | ChromaDB                            | No external server, persistent
+  Evaluation         | RAGAS + custom abstention script    | Citable; matches published RAG lit
+  Backend            | FastAPI + SQLite (query logs)       | Lean research stack
+  Frontend           | React, focused chat UI              | Existing skill
+
+================================================================================
+1. What "type" of RAG should you actually build?
+================================================================================
+
+The spectrum:
+
+  Naive RAG: chunk → embed → top-k cosine → stuff into prompt.
+  A 2024 benchmark found naive RAG without advanced techniques answers only 44%
+  of factual questions correctly vs. 63% for state-of-the-art RAG and just 34% for
+  LLMs with no retrieval at all. This is your floor, not your target.
+
+  Advanced RAG: adds hybrid retrieval (dense + keyword) and reranking.
+  Nearly every public 2024–2025 benchmark shows BM25 + dense embeddings fused
+  with Reciprocal Rank Fusion beats either retrieval method alone, and a
+  cross-encoder reranker adds another 5–15 points of MRR on hard queries.
+  ← THIS IS YOUR TARGET ARCHITECTURE
+
+  Corrective RAG (CRAG) / Self-RAG: adds a lightweight evaluator that grades
+  retrieved documents and can trigger a fallback when confidence is low. This maps
+  directly onto your AEB abstention behavior — it's not just academic, it's what
+  makes abstention real instead of aspirational.
+  ← THIS IS YOUR NOVEL LAYER (implemented as AEB loop)
+
+  Agentic RAG: replaces the linear pipeline with an agent that plans, retrieves,
+  evaluates sufficiency, and re-retrieves in a loop. Highest quality ceiling, highest
+  complexity and latency cost.
+  ← MENTION AS FUTURE WORK IN PAPER (don't build, not needed for triage QA)
+
+  Graph RAG: builds a knowledge graph over the corpus for multi-hop reasoning.
+  Not recommended for your timeline unless evaluation shows multi-hop is a major
+  failure mode.
+
+Decision (already implemented):
+  Advanced RAG (hybrid + rerank) + AEB corrective/abstention layer.
+  Clinical triage questions are mostly the "2–3 document" case — advanced RAG is
+  the right level; AEB adds the safety/novelty layer.
+
+Build order (already done in weeks 1–8 equivalent):
+  1. Naive RAG → end-to-end pipeline working ✅
+  2. Hybrid retrieval + reranker ✅
+  3. AEB corrective/abstention layer ✅ (core novel contribution)
+  4. Real corpus + real LLM ← YOU ARE HERE (Sprint 1)
+
+================================================================================
+2. Embeddings — the counter-intuitive choice (decided: BGE-M3)
+================================================================================
+
+The obvious assumption ("use a medical-specific embedding model") is NOT clearly
+correct anymore.
+
+Key finding from 2024–2026 benchmarks:
+  • PubMedBERT (trained specifically on medical data) scored BELOW a plain BM25
+    keyword-search baseline on medical retrieval.
+  • Generalist embedding models were found to be better at short-context clinical
+    semantic search than specialized medical embedding models.
+  • PubMedBERT, fine-tuned on PubMed title-abstract pairs, scores below the BM25
+    lexical baseline on the MedRAG benchmark. Modern instruction-tuned retrievers
+    outrank it by 0.22–0.25 points even on its own training domain.
+
+What this means: don't assume "medical embedding = better." Test empirically —
+reporting this counter-intuitive finding IS a genuinely interesting paper ablation.
+
+Ablation B in the paper (Embedding Model Comparison):
+  Mock → all-MiniLM-L6 → BGE-M3 → MedCPT
+  Measure: Context Precision (RAGAS) + Top-1 Accuracy
+  Expected finding: BGE-M3 (generalist) likely beats MedCPT (medical-specific)
+
+Recommended options:
+  Model              | Type                 | Decision
+  -------------------|----------------------|--------------------------------------
+  BGE-M3 ✅ CHOSEN   | Generalist, hybrid   | Best open-source all-rounder; gives
+                     | dense+sparse+multi   | hybrid retrieval from a single model;
+                     | vector in one model  | free, self-hostable, no API cost
+  MedCPT             | Medical-specific     | Include as ablation comparison point
+  all-MiniLM-L6-v2  | Lightweight          | Use in ablation (fast local dev loop)
+  Voyage-3-large     | Commercial API       | Not used (API cost, no budget)
+  OpenAI text-emb-3  | Commercial API       | Not used (API cost, no budget)
+
+================================================================================
+3. Chunking Strategy (decided: structure-aware + sentence-window)
+================================================================================
+
+Recommended approach (implemented):
+  1. Primary split: by document structure (section headers: "Diagnosis",
+     "First-line treatment", "Contraindications" — guideline docs are
+     already well-structured, use that)
+  2. Within each section: sentence-window chunking — index individual sentences
+     for precise retrieval, expand to 2–3 surrounding sentences when passing
+     context to the LLM
+  3. Size: 512 tokens per chunk, 100-token overlap (in configs/seeds.yaml)
+  4. Metadata on every chunk: source guideline name, year, section type, specialty
+     → enables "grounded in [NICE Guideline X, 2023]" in answers
+
+What NOT to do: naive fixed-size character splitting with no structure awareness
+— it's fastest to implement but benchmarks badly (part of the 44% naive RAG result).
+
+================================================================================
+4. Hybrid Retrieval + Reranking (decided: BGE-M3 dense + BM25 via RRF)
+================================================================================
+
+Retrieval fusion:
+  Dense retrieval: BGE-M3 (cosine/dot-product similarity)
+  Sparse/keyword retrieval: BM25 (rank-bm25) — critical for clinical text because
+    exact-match terms (drug names, dosages, ICD codes) are common and dense
+    embeddings miss exact-term precision
+  Fusion method: Reciprocal Rank Fusion (RRF) — simple, well-established,
+    no learned fusion weights. BGE-M3 supports this natively.
+
+Reranking:
+  BGE-reranker (open-source, self-hostable) on top-20–50 candidates.
+  Cross-encoder jointly encodes query+document — more accurate than embedding
+  similarity but slower, so only apply to a shortlist.
+
+  Honest caveat (cite this in the paper): the ARAGOG benchmark found Cohere Rerank
+  showed no notable advantage over naive RAG in some tests — benchmark rerankers
+  on your own corpus rather than assuming they help.
+
+================================================================================
+5. Generation LLM — Resolved for RTX 4050 (6 GB)
+================================================================================
+
+CHOSEN: microsoft/Llama3-Med-8B-Instruct
+  • Medical domain fine-tuning (best fit for clinical QA)
+  • 8B parameters — fits in 6 GB at 4-bit, 16 GB at fp16
+  • Llama 3 Community License — clear for research
+
+THREE SERVING BACKENDS (auto-selected by detect_hardware()):
+
+Backend 1: local_4bit — RTX 4050 (6 GB), development
+  from transformers import BitsAndBytesConfig, pipeline
+
+  quantization_config = BitsAndBytesConfig(
+      load_in_4bit=True,
+      bnb_4bit_quant_type="nf4",
+      bnb_4bit_use_double_quant=True,
+      bnb_4bit_compute_dtype=torch.bfloat16,
+  )
+  pipe = pipeline(
+      "text-generation",
+      model="microsoft/Llama3-Med-8B-Instruct",
+      model_kwargs={"quantization_config": quantization_config},
+      device_map="auto",
+      max_new_tokens=256,   # keep KV cache small for 6 GB
+  )
+
+  Active VRAM: ~4.5 GB → leaves ~1.5 GB for KV cache. Fits RTX 4050.
+  Use for: local dev smoke tests, unit tests, small sanity checks.
+
+Backend 2: kaggle_fp16 — Kaggle T4 (16 GB), paper experiments
+  pipe = pipeline(
+      "text-generation",
+      model="microsoft/Llama3-Med-8B-Instruct",
+      torch_dtype=torch.float16,
+      device_map="auto",
+      max_new_tokens=512,   # full quality on 16 GB
+  )
+
+  Use for: full MedQA benchmark runs (200 questions), ablation sweeps.
+  Cost: FREE — Kaggle provides 30h GPU/week, no idle cutoff like Colab.
+  Setup: upload repo as Kaggle dataset, run notebooks/kaggle_eval_template.ipynb.
+
+Backend 3: hf_inference_api — HuggingFace Inference API, RAGAS judging
+  from huggingface_hub import InferenceClient
+  client = InferenceClient(
+      model="microsoft/Llama3-Med-8B-Instruct",
+      token=os.environ["HF_TOKEN"],
+  )
+  response = client.text_generation(prompt, max_new_tokens=256)
+
+  Use for: RAGAS judge calls (zero local VRAM).
+  Cost: FREE — free tier ~1000 requests/day. Sufficient for 200-sample MedQA eval.
+  Setup: get free token at hf.co/settings/tokens.
+
+Hardware auto-config table:
+  Detected VRAM   | Auto-selected mode
+  ≥ 20 GB         | kaggle_fp16
+  10–19 GB        | local_4bit
+  < 10 GB (4050)  | local_4bit + RAGAS via hf_inference_api
+  No GPU          | hf_inference_api for all calls
+
+Why NOT vLLM:
+  vLLM's CUDA graph pre-allocation alone requires ≥8 GB working set — exceeds
+  RTX 4050's 6 GB even before model weights. Correct choice is in-process pipeline().
+
+Why NOT Colab as primary:
+  Free Colab has 2–4h idle cutoff, making long eval runs unreliable. Kaggle's
+  30h/week with no idle cutoff is strictly better for batch benchmark runs.
+
+================================================================================
+6. Orchestration — Custom code (no framework for the abstention layer)
+================================================================================
+
+CHOSEN: Custom code for AEB/abstention logic; HuggingFace transformers directly.
+
+  Option       | Decision
+  -------------|-------------------------------------------------------------------
+  LlamaIndex   | Used only for document loaders / chunking utilities if needed
+  LangChain    | Used ONLY as the LangchainLLMWrapper adapter for RAGAS judge
+  Haystack     | Not used
+  Raw/custom   | ✅ AEB loop, confidence estimation, verification — all custom
+               |   Reason: for the paper, you need to precisely describe and
+               |   control exactly how the novel contribution works. Burying it
+               |   inside a framework's agent loop makes both the implementation
+               |   and the Methods section muddier than needed.
+
+================================================================================
+7. Vector Database — Resolved: ChromaDB
+================================================================================
+
+CHOSEN: ChromaDB (persistent, no external server)
+
+  Option    | Decision       | Reason
+  ----------|----------------|--------------------------------------------------
+  ChromaDB  | ✅ CHOSEN       | Zero external service, in-process Python,
+            |                | persistent on disk. Fits corpus scale (48K chunks
+            |                | → ~500K vectors after chunking). No server to run.
+  Qdrant    | Future upgrade  | Correct pre-filtering behavior at larger scale.
+            |                | Migrate if corpus grows beyond ~5M vectors.
+  pgvector  | Not used        | Would need PostgreSQL setup — unnecessary for
+            |                | research prototype. SQLite handles query logs.
+  Weaviate  | Not used        | Schema-first friction during dev + heavy memory
+            |                | tuning overhead — heavier than needed.
+
+Note: ChromaDB applies metadata filters AFTER similarity search (over-fetches to
+compensate). Fine for this corpus size, but document this limitation in the paper.
+
+================================================================================
+8. Evaluation Framework — Resolved: RAGAS + custom abstention script
+================================================================================
+
+CHOSEN: RAGAS (open-source) + custom abstention-rate curve script
+
+  Tool       | Decision       | What it measures
+  -----------|----------------|--------------------------------------------------
+  RAGAS      | ✅ PRIMARY      | Faithfulness, Answer Relevancy, Context Precision,
+             |                | Context Recall — maps directly onto your eval
+             |                | protocol. Widely cited → your numbers are directly
+             |                | comparable to published RAG papers.
+  TruLens    | Alternative     | More pipeline-debugging visibility; use if RAGAS
+             |                | proves insufficient for debugging
+  DeepEval   | Not used        | Unit-test-style eval; good for CI integration
+             |                | but less RAG-specialized than RAGAS
+
+RAGAS judge configuration (zero local VRAM):
+  from ragas import evaluate
+  from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+  from ragas.llms import LangchainLLMWrapper
+  from langchain_huggingface import HuggingFaceEndpoint
+
+  judge_llm = LangchainLLMWrapper(
+      HuggingFaceEndpoint(
+          repo_id="microsoft/Llama3-Med-8B-Instruct",
+          huggingfacehub_api_token=os.environ["HF_TOKEN"],
+          max_new_tokens=256,
+      )
+  )
+  result = evaluate(
+      dataset,
+      metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+      llm=judge_llm,
+  )
+
+Custom abstention script (your novel contribution — no off-the-shelf tool):
+  • Sweep θ ∈ {0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9}
+  • Record (threshold, accuracy, abstention_rate, hallucination_rate) at each point
+  • Output CSV → matplotlib Pareto curve → Figure 1 in the paper
+
+================================================================================
+9. Backend Stack — Resolved: FastAPI + SQLite
+================================================================================
+
+API framework: FastAPI — async-native (streaming LLM responses), auto-generated
+  OpenAPI docs, native Pydantic validation (structured RAG outputs).
+  ✅ Already implemented.
+
+Metadata DB: SQLite (query logs, evaluation results) — not PostgreSQL.
+  Reason: no database server to provision; SQLite is perfectly valid for a research
+  prototype. The ER diagram in pdf1_text.txt is implemented as SQLite tables.
+
+Auth: JWT — already implemented. Reuse directly.
+
+================================================================================
+10. Frontend — Resolved: React, focused chat UI
+================================================================================
+
+React (existing skill). Key screens:
+  (1) Query input with patient context fields
+  (2) Streamed answer with inline citations
+  (3) Confidence/abstention indicator (MOST IMPORTANT for reviewers):
+      🟢 High confidence → evidence cited, answer shown
+      🟡 Moderate → answer + "consider follow-up" prompt
+      🔴 Low / abstained → "⚠ Insufficient grounding — consult a specialist"
+  (4) Evaluation dashboard: RAGAS scores, hallucination rate, abstention rate
+
+Budget: 1–2 weeks total. This is a research demo, not a product.
+
+================================================================================
+11. Safety/Guardrails Layer
+================================================================================
+
+Hard-coded disclaimer in every API response and UI screen (not buried in README).
+
+Lightweight rule-based emergency check:
+  • Chest pain + sweating + age > 60 → immediate ESCALATE, no LLM call
+  • BP < 90 systolic OR oxygen < 90% → immediate ESCALATE
+  • Pattern matching on symptom severity keywords
+
+NLI verification: DeBERTa-v3-large-MNLI checks each claim (entailment > 0.7).
+AEB abstention: if confidence < θ after max_k chunks retrieved → abstain,
+  never hallucinate.
+
+================================================================================
+12. Full Resolved Stack Table
+================================================================================
+
+  Layer              | Choice                              | Alternative(s)
+  -------------------|-------------------------------------|---------------------
+  RAG architecture   | Advanced RAG + AEB abstention       | Naive RAG (too weak)
+                     | (Corrective RAG principles adapted  | Full agentic RAG
+                     |  for clinical abstention)           | (too complex)
+  Embedder           | BGE-M3 (FlagEmbedding)              | MedCPT (ablation)
+                     |                                     | all-MiniLM (ablation)
+  Chunking           | Structure-aware, 512 tok, 100 ovlp  | Fixed-size naive
+  Retrieval fusion   | Dense + BM25 via RRF                | Dense-only
+  Reranker           | BGE-reranker (open-source)          | Cohere Rerank (API)
+  Generation LLM     | Llama3-Med-8B-Instruct (resolved)  | —
+  LLM (local dev)    | 4-bit NF4, bitsandbytes, RTX 4050  | —
+  LLM (paper eval)   | fp16, Kaggle T4 notebook (free)    | Colab Pro A100
+  RAGAS judge        | Same model, HF Inference API (free) | Kaggle loaded pipe
+  Orchestration      | Custom code                        | LlamaIndex (loaders)
+  Vector DB          | ChromaDB                           | Qdrant (scale-up)
+  Evaluation         | RAGAS + custom abstention script   | TruLens, DeepEval
+  Backend            | FastAPI + SQLite                   | Flask (prior stack)
+  Frontend           | React, focused chat UI             | —
+  Experiment track   | MLflow / W&B                       | —
+  Containerisation   | Docker (local + demo)              | —
+
+================================================================================
+13. Build Order (revised to reflect current status)
+================================================================================
+
+  ✅ Weeks 1–8 equiv:  Naive RAG → hybrid retrieval + AEB abstention layer
+                      → NLI verifier → confidence calibration → API (DONE)
+
+  Week 1 (now):       Real corpus (epfl-llm/guidelines → ChromaDB) + BGE-M3 +
+                      OpenSourceLLMReasoner (4-bit NF4) + HFInferenceReasoner +
+                      RAGAS judge config + detect_hardware() + Kaggle notebook
+
+  Week 2:             Missing API endpoints (upload, query-log, eval-run, review)
+
+  Week 3:             MedQA + PubMedQA loaders + RAGAS → run_all + θ sweep
+
+  Week 4:             Frontend confidence badge + Drug Safety Agent (optional)
+
+  Week 5 (Kaggle T4): 3 baseline experiments + 2 ablation studies (200-question MedQA)
+
+  Weeks 6–8:          Write Methods → Results → Discussion → Introduction → Abstract
+                      → IEEE formatting → conference submission
+
+================================================================================
+[End of Document]

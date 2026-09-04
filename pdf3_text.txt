@@ -1,0 +1,267 @@
+Dataset & Guideline-Source Setup Guide
+RAG-Based Clinical Decision Support / Triage Assistant
+[UPDATED: Sep 2026 — corpus, domain, and eval datasets resolved]
+
+================================================================================
+RESOLVED DECISIONS
+================================================================================
+
+  Decision               | Choice                         | Status
+  -----------------------|--------------------------------|------------------
+  Grounding corpus       | epfl-llm/guidelines (All)       | Sprint 1 (Week 1)
+  Clinical sub-domain    | General (All clinical domains) | CONFIRMED
+  Supplementary corpus   | Not needed for Sprint 1        | Deferred
+  Primary eval benchmark | MedQA (USMLE-style)            | Sprint 3 (Week 3)
+  Secondary benchmark    | PubMedQA                       | Sprint 3 (Week 3)
+  Hallucination eval     | RAGAS + DeBERTa NLI verifier   | Sprint 1–3
+  Vector DB              | ChromaDB (local, persistent)   | Sprint 1
+  Embedding model        | BGE-M3 (FlagEmbedding)         | Sprint 1
+
+================================================================================
+1. Grounding Corpus — Decided: epfl-llm/guidelines, General (All Specialties)
+================================================================================
+
+PRIMARY CORPUS: EPFL-LLM Guidelines (HuggingFace)
+  "A curated collection of clinical practice guidelines (CPGs) comprising 48,096
+  articles from 17 globally recognized sources, spanning internal medicine,
+  pediatrics, oncology, infectious disease, and more, across high- and low-resource
+  settings." — Built specifically for medical LLM training/RAG use, already chunked
+  and structured, free on HuggingFace (epfl-llm/guidelines).
+
+  Load command:
+    from datasets import load_dataset
+    ds = load_dataset("epfl-llm/guidelines", split="train")
+
+  Why start here: already vetted, multi-domain, RAG-ready — skip weeks of
+  scraping/cleaning and go straight to building retrieval pipeline.
+
+Domain scope: GENERAL CLINICAL PRACTICE GUIDELINES ✅ CONFIRMED
+  Reason: Full multi-specialty coverage (internal medicine, cardiology, oncology,
+  pulmonology, pediatrics, etc.) provides comprehensive grounding across MedQA/PubMedQA
+  benchmarks, demonstrating robust cross-domain generalization.
+
+  Corpus Loading (Sprint 1, src/data/guidelines_loader.py):
+    ds = load_dataset("epfl-llm/guidelines", split="train")
+    # All 48K articles indexed; metadata preserves specialty, source, and sections.
+
+CLI entry point:
+  python -m src.cli ingest --corpus epfl-llm/guidelines
+
+Supplementary corpora (deferred — not needed for Sprint 1–3):
+  • MedWiki (~1.3M chunks from 150K Wikipedia medical articles) — add if
+    triage assistant needs broader general medical background knowledge
+  • ClinicalCorp (2.3M+ chunks, combines guideline sources with clinical text)
+    — add if evaluation shows retrieval gaps on general clinical literature
+  • Meditron pretraining corpus (710K+ chunks across 8 open-source guideline
+    datasets) — use as retrieval quality cross-check
+
+If you want a smaller, more curated corpus instead:
+  WHO guidelines (who.int/publications) — freely downloadable PDFs
+  NICE guidelines (nice.org.uk) — UK, well-structured
+  CDC clinical guidance (cdc.gov) — US, freely accessible
+  → Only fall back to these if epfl-llm/guidelines proves inadequate after eval.
+
+================================================================================
+2. Evaluation Datasets — Decided: MedQA (primary) + PubMedQA (secondary)
+================================================================================
+
+  Dataset           | What it tests                   | Use                  | Sprint
+  ------------------|----------------------------------|----------------------|--------
+  MedQA ✅ PRIMARY  | Clinical reasoning, USMLE-style  | Core accuracy bench  | 3
+  (USMLE-style MCQ) | multiple-choice                  | Most-cited in lit    |
+  PubMedQA ✅ SEC.  | Yes/no/maybe biomedical QA       | Grounding vs         | 3
+                    |                                  | research literature  |
+  MedMCQA           | Large-scale medical MCQ          | Add if need more     | Optional
+                    | (entrance exam style)            | statistical power    |
+  MEDIQA-CORR       | Medical error detection &        | Strong hallucination | Optional
+                    | correction in clinical notes     | /safety benchmark    |
+  MultiCaRe         | 96K real de-identified clinical  | Qualitative case     | Paper
+                    | case reports (PubMed Central)    | studies in paper     | writing
+
+  Load commands:
+    from datasets import load_dataset
+    medqa    = load_dataset("bigbio/med_qa", split="test")
+    pubmedqa = load_dataset("bigbio/pubmed_qa", split="test")
+
+IMPORTANT: Hold these out ENTIRELY from corpus-building. They are evaluation-only.
+Never include MedQA/PubMedQA text in the ChromaDB index.
+
+Evaluation sequence:
+  1. Validate pipeline on MedQA first (widely used, easy baseline comparison)
+  2. Run PubMedQA for hallucination/grounding-specific claims
+  3. Use 5–10 MultiCaRe cases as illustrative qualitative examples in paper
+
+================================================================================
+3. Hallucination Rate — Four-Part Evaluation Protocol (Resolved)
+================================================================================
+
+The 2025 JAMIA review of RAG-in-clinical-LLM literature is explicit: "Studies
+increasingly fine-tune LLMs to assess the relevance of retrieved evidence, verify
+generated statements are evidence-based, and confirm the response actually
+addresses the clinical question — there remains real room for improvement in how
+rigorously this is evaluated."
+
+Your paper uses a four-part protocol (addresses the standardization gap directly):
+
+  1. Answer Accuracy (vs. MedQA/PubMedQA ground truth)
+     → Top-1 accuracy on MCQ; reported per baseline and per θ value
+
+  2. Groundedness (RAGAS Faithfulness + custom NLI check)
+     → Does every claim in the answer trace back to a retrieved passage?
+     → Measured via DeBERTa-v3-MNLI entailment (entailment prob > 0.7)
+     → Spot-validated by human review on a 50-sample subset
+     → RAGAS Faithfulness score for cross-paper comparability
+
+  3. Retrieval Precision (RAGAS Context Precision + Context Recall)
+     → Are the top-k retrieved chunks actually relevant?
+     → Measured via RAGAS judge (HF Inference API, zero local VRAM)
+
+  4. Abstention Behavior (novel contribution — no off-the-shelf tool)
+     → Does the system correctly say "insufficient evidence" when the corpus
+       doesn't cover the question?
+     → Sweep θ ∈ {0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9}
+     → Record (threshold, accuracy, abstention_rate, hallucination_rate)
+     → Plot Pareto curve → Figure 1 in the IEEE paper
+
+This four-part protocol is STRONGER and more publishable than accuracy alone.
+Build it into the evaluation harness (src/experiments/ragas_eval.py) in Sprint 1,
+not as a week-15 afterthought.
+
+================================================================================
+4. Preprocessing & Chunking (Resolved — mirrors pdf2_text.txt §3)
+================================================================================
+
+Chunk size: 512 tokens per chunk, 100-token overlap (in configs/seeds.yaml).
+  Start here; validate against your retrieval-precision metric before changing.
+
+Chunk by structure first (guideline docs have clear section headers):
+  "Diagnosis" / "First-line treatment" / "Contraindications" / "Dosing"
+  → Preserve section type as metadata on each chunk
+
+Metadata on every chunk:
+  source (str): guideline name (e.g., "WHO Infectious Disease Guideline 2023")
+  specialty (str): "infectious_disease"
+  section_type (str): "diagnosis" | "treatment" | "contraindication" | ...
+  publication_date (str): year
+  chunk_id (uuid): for citation display
+
+Keep source citations attached to every chunk:
+  → Enables "Grounded in [WHO ID Guideline 2023, §Treatment]" in answers
+  → Both a safety feature and a strong demo moment for reviewers
+
+De-duplicate across corpora if you combine epfl-llm + MedWiki + ClinicalCorp:
+  → Overlapping content will skew retrieval toward duplicated topics
+
+Implementation: src/data/guidelines_loader.py (Sprint 1, Task 1.1)
+
+================================================================================
+5. Vector Database & Retrieval Stack (Resolved — ChromaDB + BGE-M3)
+================================================================================
+
+  Component        | Resolved Choice         | Notes
+  -----------------|-------------------------|----------------------------------
+  Embedding model  | BGE-M3 (FlagEmbedding)  | Hybrid-native; generalist beats
+                   |                         | medical-specific on this task type
+                   |                         | (see pdf2_text.txt §2 for evidence)
+  Vector DB        | ChromaDB (persistent)   | No external server; fits 48K→500K
+                   |                         | chunk corpus; filter post-search
+                   |                         | (acceptable at this scale)
+  Retrieval        | Dense + BM25 via RRF    | Clinical text has exact-match terms
+  strategy         |                         | (drug names, dosages) where BM25
+                   |                         | outperforms pure semantic search
+  LLM generation   | Llama3-Med-8B-Instruct  | See §5 of pdf2_text.txt for full
+                   | (3 backends)            | backend details
+
+Corpus scale estimate (Full Guidelines Corpus):
+  epfl-llm/guidelines has 48,096 articles across major specialties.
+  Chunking at 512 tokens with 100-token overlap produces ~500K–1M chunks.
+  This fits cleanly in ChromaDB's local scale capacity (~2–5M vectors).
+
+ChromaDB setup (Sprint 1):
+  pip install chromadb
+  # In src/kb/vector_store.py → ChromaVectorStore class
+  # In configs/seeds.yaml → add chroma_persist_dir: "data/chroma_db"
+
+================================================================================
+6. Data Governance (state this explicitly in your proposal and paper)
+================================================================================
+
+Every source used is either:
+  • Open-access/de-identified (MultiCaRe — PubMed Central articles)
+  • Formal public guideline documents (WHO/NICE/CDC, epfl-llm/guidelines corpus)
+  • Standard research benchmarks (MedQA, PubMedQA — designed for model eval)
+
+NO real patient-identifiable data is used anywhere in this project.
+
+This preempts the most common review-panel question for any "clinical" capstone.
+State it plainly in:
+  • The capstone proposal (Section "Realistic Constraints")
+  • The paper (Methods section, Data paragraph, first sentence)
+  • The demo / README disclaimer
+
+================================================================================
+7. Week 1 Action Checklist (Sprint 1)
+================================================================================
+
+  [ ] Task 1.1 — Load epfl-llm/guidelines (All specialties)
+      File: src/data/guidelines_loader.py (NEW)
+      from datasets import load_dataset
+      ds = load_dataset("epfl-llm/guidelines", split="train")
+      # Inspect 20 samples manually before indexing the full corpus
+
+  [ ] Task 1.2 — Set up ChromaDB, embed and index
+      File: src/kb/vector_store.py — add ChromaVectorStore class
+      # Smoke test: index 5,000 chunks before committing to full corpus
+      # Verify metadata (source, specialty, section_type) is stored correctly
+
+  [ ] Task 1.3 — Wire BGE-M3 embedder (FlagEmbedding)
+      File: src/kb/embedder.py — add BGE_M3Embedder class
+      pip install FlagEmbedding
+      from FlagEmbedding import BGEM3FlagModel
+
+  [ ] Task 1.7 — OpenSourceLLMReasoner (4-bit NF4) + HFInferenceReasoner
+      File: src/agents/reasoner.py
+      Test with: python -m src.cli query "..." --mode real
+
+  [ ] Task 1.8 — RAGAS eval script with HF Inference API judge
+      File: src/experiments/ragas_eval.py (NEW)
+      Test with: python -m src.experiments.ragas_eval --benchmark medqa --n 10
+
+  [ ] Task 1.9 — Update configs/seeds.yaml + LLMConfig in src/config.py
+      Add: serving_backend, load_in_4bit, bnb_double_quant, ragas_judge section
+
+  [ ] Task 1.10 — Add detect_hardware() to src/config.py
+      Test with: python -c "from src.config import detect_hardware; print(detect_hardware())"
+
+  [ ] Download MedQA and PubMedQA now — hold out entirely from corpus
+      from datasets import load_dataset
+      medqa = load_dataset("bigbio/med_qa", split="test")  # DO NOT index
+
+  [ ] Set HF_TOKEN in configs/secrets.yaml (free at hf.co/settings/tokens)
+      Needed for: HFInferenceReasoner + RAGAS HuggingFaceEndpoint judge
+
+  [ ] Draft/verify the data-governance paragraph in the proposal
+      (5 minutes now saves a review-day scramble later)
+
+  [ ] Create notebooks/kaggle_eval_template.ipynb skeleton
+      (needed for Week 5 paper experiments on Kaggle T4)
+
+================================================================================
+8. Compute Notes for Dataset Operations
+================================================================================
+
+Indexing the epfl-llm/guidelines corpus (Full Corpus):
+  • Runs on LOCAL machine (RTX 4050) or Kaggle T4 — BGE-M3 embedding for ~500K chunks
+    takes ~30–60 minutes on GPU. Do this once, persist ChromaDB.
+  • Pre-upload completed ChromaDB as Kaggle Dataset to avoid re-indexing.
+
+MedQA/PubMedQA eval runs:
+  • Local: 10-sample smoke test → confirm pipeline works
+  • Kaggle T4: full 200-question eval run → download results CSV
+
+RAGAS scoring:
+  • ALL RAGAS calls go to HF Inference API (free tier, zero local VRAM)
+  • HF_TOKEN required — set in configs/secrets.yaml before running ragas_eval.py
+
+================================================================================
+[End of Document]
