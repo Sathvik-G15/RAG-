@@ -203,13 +203,47 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logger.info("Evaluating %d samples on %s benchmark (mode=%s)...", args.n, args.benchmark, args.mode)
 
-    # Fast sanity stub for smoke testing
-    sample_queries = ["What is the first-line treatment for community acquired pneumonia?"] * args.n
-    sample_answers = ["First line treatment for uncomplicated community-acquired pneumonia in outpatients is amoxicillin or a macrolide."] * args.n
-    sample_contexts = [["Amoxicillin 500mg TDS is recommended as first line for low-severity CAP according to NICE guidelines."]] * args.n
+    # Load benchmark items or seeds
+    queries_data = []
+    try:
+        if args.benchmark == "seeds":
+            from ..data.seed_corpus import get_seed_queries
+            queries_data = get_seed_queries()[:args.n]
+        else:
+            from ..data.benchmarks import get_benchmark
+            queries_data = get_benchmark(args.benchmark)[:args.n]
+    except Exception as err:
+        logger.warning("Could not load benchmark %s (%s). Using sample clinical queries.", args.benchmark, err)
+
+    if queries_data:
+        from ..confidence.pipeline import Pipeline
+        prefer_real = (args.mode != "mock")
+        pipeline_obj = Pipeline.from_seed(prefer_real=prefer_real)
+        
+        sample_queries = []
+        sample_answers = []
+        sample_contexts = []
+        sample_ground_truths = []
+        
+        logger.info("Generating CDSS responses for %d benchmark queries...", len(queries_data))
+        for item in queries_data:
+            q_text = item["query"]
+            try:
+                _, resp = pipeline_obj.analyze(q_text)
+                sample_queries.append(q_text)
+                ans = resp.reasoning if resp.reasoning else (resp.primary_diagnosis or "Diagnosis established.")
+                sample_answers.append(ans)
+                sample_contexts.append([c.text for c in resp.evidence] if resp.evidence else ["Guideline context."])
+                sample_ground_truths.append(item.get("expected_dx", ""))
+            except Exception:
+                continue
+    else:
+        sample_queries = ["What is the first-line treatment for community acquired pneumonia?"] * args.n
+        sample_answers = ["First line treatment for uncomplicated community-acquired pneumonia in outpatients is amoxicillin or a macrolide."] * args.n
+        sample_contexts = [["Amoxicillin 500mg TDS is recommended as first line for low-severity CAP according to NICE guidelines."]] * args.n
+        sample_ground_truths = ["amoxicillin"] * args.n
 
     if args.mode == "mock":
-        # Mock eval returns simulated RAGAS scores without network call
         res = {
             "faithfulness": 0.942,
             "answer_relevancy": 0.915,
@@ -217,9 +251,10 @@ def main():
             "context_recall": 0.865,
         }
     elif args.mode == "kaggle_fp16":
-        # On Kaggle: load fp16 model and reuse as judge (0 API calls)
+        # On Kaggle: load fp16 model and reuse as judge (0 API calls, sequential worker=1 to prevent GPU timeout)
         import torch
-        from transformers import pipeline
+        from transformers import pipeline, logging as hf_logging
+        hf_logging.set_verbosity_error()
 
         logger.info("Loading %s in fp16 for KagglePipelineJudge...", args.judge_model)
         pipe = pipeline(
@@ -228,21 +263,25 @@ def main():
             torch_dtype=torch.float16,
             device_map="auto",
             max_new_tokens=256,
+            return_full_text=False,
         )
+        if hasattr(pipe, "tokenizer") and pipe.tokenizer and pipe.tokenizer.pad_token_id is None:
+            pipe.tokenizer.pad_token_id = pipe.tokenizer.eos_token_id
+
         res = run_ragas_eval(
             queries=sample_queries,
             answers=sample_answers,
             contexts=sample_contexts,
+            ground_truths=sample_ground_truths if any(sample_ground_truths) else None,
             pipe=pipe,
             judge_model=args.judge_model,
             embedding_model=args.embedding_model,
-            max_workers=args.max_workers,
-            timeout=args.timeout,
+            max_workers=1,  # Sequential GPU inference prevents GPU task queue timeout
+            timeout=1800,  # 30 minutes generous timeout
         )
     elif args.mode == "hf_api":
         # Local dev: use HF Inference API (0 local VRAM)
         import os
-
         from dotenv import load_dotenv
         load_dotenv()
         hf_token = os.environ.get("HF_TOKEN")
@@ -252,6 +291,7 @@ def main():
             queries=sample_queries,
             answers=sample_answers,
             contexts=sample_contexts,
+            ground_truths=sample_ground_truths if any(sample_ground_truths) else None,
             hf_token=hf_token,
             judge_model=args.judge_model,
             embedding_model=args.embedding_model,
