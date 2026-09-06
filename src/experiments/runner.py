@@ -103,11 +103,18 @@ def _dx_matches(
 
     # 6. Binary decisions (e.g. PubMedQA "yes" / "no" / "maybe")
     if exp_str in ["yes", "no", "maybe"]:
-        if full_response and full_response.reasoning:
-            r_lower = full_response.reasoning.lower()
-            if exp_str == "yes" and any(k in r_lower for k in ["is effective", "is associated", "concludes yes", "positive association"]):
+        combined_text = f"{pred_str} {(full_response.reasoning if full_response else '')}".lower()
+        if exp_str == "yes":
+            yes_cues = ["yes", "effective", "associated", "supports", "demonstrates", "beneficial", "increases", "confirms", "improves", "indicated", "positive", "recommended"]
+            if any(w in combined_text for w in yes_cues) and not any(neg in combined_text for neg in ["not effective", "no significant", "does not"]):
                 return True
-            elif exp_str == "no" and any(k in r_lower for k in ["not effective", "no significant", "concludes no", "no association"]):
+        elif exp_str == "no":
+            no_cues = ["no", "not effective", "no significant", "does not", "no difference", "fails to", "unlikely", "not recommended", "ineffective", "no association", "not indicated"]
+            if any(w in combined_text for w in no_cues):
+                return True
+        elif exp_str == "maybe":
+            maybe_cues = ["maybe", "uncertain", "unclear", "inconclusive", "requires further", "mixed results", "potential"]
+            if any(w in combined_text for w in maybe_cues):
                 return True
 
     return False

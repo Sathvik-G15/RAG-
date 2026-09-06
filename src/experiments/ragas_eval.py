@@ -154,16 +154,30 @@ def run_ragas_eval(
             show_progress=True,
         )
         out_dict = {}
-        for k, v in dict(results).items():
-            try:
-                val = float(v)
-                if not (val != val):  # check not NaN
-                    out_dict[k] = val
-                else:
-                    out_dict[k] = 0.0
-            except (ValueError, TypeError):
-                out_dict[k] = 0.0
-        return out_dict
+        if hasattr(results, "to_pandas"):
+            df = results.to_pandas()
+            for col in df.columns:
+                if col in ["faithfulness", "answer_relevancy", "context_precision", "context_recall", "harmfulness", "semantic_similarity"]:
+                    series = df[col].dropna()
+                    if len(series) > 0:
+                        out_dict[col] = round(float(series.mean()), 4)
+            if not out_dict:
+                means = df.mean(numeric_only=True).to_dict()
+                for k, v in means.items():
+                    if not (v != v):
+                        out_dict[k] = round(float(v), 4)
+        elif isinstance(results, dict):
+            for k, v in results.items():
+                try:
+                    val = float(v)
+                    if not (val != val):
+                        out_dict[k] = round(val, 4)
+                except (ValueError, TypeError):
+                    pass
+        
+        if out_dict:
+            return out_dict
+        raise ValueError(f"No metric scores found in evaluation result: {results}")
     except Exception as exc:
         logger.warning("RAGAS evaluate encountered an error: %s. Using fallback score estimation.", exc)
         return {
