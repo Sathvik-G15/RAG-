@@ -59,11 +59,16 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("No chunks generated.")
         return
 
+    print(f"Generated {len(chunks)} chunks from corpus. Initializing embedder & vector store...")
     cfg = get_app_config()
     embedder = make_embedder(model_name=cfg.embedding.model_name, prefer_real=args.real)
     store = make_vector_store(backend="chroma", persist_dir=args.chroma_dir)
+
+    print(f"Computing embeddings for {len(chunks)} chunks...")
     texts = [c.text for c in chunks]
     embs = embedder.embed(texts)
+
+    print(f"Upserting {len(chunks)} chunks into ChromaDB at {args.chroma_dir}...")
     store.add(chunks, embs)
     print(f"Successfully ingested {len(chunks)} chunks into ChromaDB at {args.chroma_dir}.")
 

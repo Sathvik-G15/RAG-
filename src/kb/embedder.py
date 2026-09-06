@@ -75,7 +75,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         return self._dim
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
-        vecs = self._model.encode(list(texts), convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        vecs = self._model.encode(list(texts), batch_size=128, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=True)
         return vecs.astype(np.float32)
 
 
@@ -100,10 +100,10 @@ class BGE_M3Embedder(BaseEmbedder):
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
         if self._use_flag:
-            res = self._model.encode(list(texts), return_dense=True)
+            res = self._model.encode(list(texts), batch_size=128, return_dense=True)
             vecs = res["dense_vecs"]
             return np.array(vecs, dtype=np.float32)
-        vecs = self._model.encode(list(texts), convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        vecs = self._model.encode(list(texts), batch_size=128, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=True)
         return vecs.astype(np.float32)
 
 

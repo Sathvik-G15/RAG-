@@ -1,0 +1,117 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-medical-neutral-200;
+  }
+
+  body {
+    @apply bg-medical-neutral-50 text-medical-neutral-900 antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-medical-primary-500 ring-offset-2 ring-offset-white dark:ring-offset-medical-neutral-900;
+  }
+
+  ::selection {
+    @apply bg-medical-primary-200 text-medical-primary-900;
+  }
+}
+
+@layer components {
+  .container-page {
+    @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+
+  .page-section {
+    @apply py-8 sm:py-12 lg:py-16;
+  }
+
+  .card-base {
+    @apply bg-white dark:bg-medical-neutral-800 rounded-xl border border-medical-neutral-200 dark:border-medical-neutral-700 shadow-medical;
+  }
+
+  .card-hover {
+    @apply transition-shadow duration-200 hover:shadow-medical-lg;
+  }
+
+  .btn-base {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none;
+  }
+
+  .input-base {
+    @apply w-full rounded-lg border border-medical-neutral-300 dark:border-medical-neutral-600 bg-white dark:bg-medical-neutral-800 px-3 py-2.5 text-sm placeholder:text-medical-neutral-400 transition-colors focus:border-medical-primary-500 focus:outline-none focus:ring-1 focus:ring-medical-primary-500 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .label-base {
+    @apply block text-sm font-medium text-medical-neutral-700 dark:text-medical-neutral-300 mb-1.5;
+  }
+
+  .badge-base {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+
+  .table-container {
+    @apply overflow-x-auto rounded-xl border border-medical-neutral-200 dark:border-medical-neutral-700;
+  }
+
+  .table-base {
+    @apply w-full text-sm text-left;
+  }
+
+  .table-base th {
+    @apply px-4 py-3 font-medium text-medical-neutral-500 dark:text-medical-neutral-400 bg-medical-neutral-50 dark:bg-medical-neutral-800 border-b border-medical-neutral-200 dark:border-medical-neutral-700;
+  }
+
+  .table-base td {
+    @apply px-4 py-3 border-b border-medical-neutral-100 dark:border-medical-neutral-800;
+  }
+
+  .table-base tbody tr {
+    @apply transition-colors hover:bg-medical-neutral-50 dark:hover:bg-medical-neutral-800/50;
+  }
+
+  .skeleton-base {
+    @apply animate-pulse bg-medical-neutral-200 dark:bg-medical-neutral-700 rounded;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.medical.neutral.300') transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: theme('colors.medical.neutral.300');
+    border-radius: 3px;
+  }
+
+  .dark .scrollbar-thin {
+    scrollbar-color: theme('colors.medical.neutral.600') transparent;
+  }
+
+  .dark .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: theme('colors.medical.neutral.600');
+  }
+}

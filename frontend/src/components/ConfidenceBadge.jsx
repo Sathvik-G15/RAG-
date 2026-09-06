@@ -54,8 +54,8 @@ export default function ConfidenceBadge({
         <div style={{ fontSize: "0.95rem" }}>{label}</div>
         {showDetails && (
           <div style={{ fontSize: "0.8rem", opacity: 0.8, marginTop: "2px" }}>
-            Confidence: {Math.round(confidence * 100)}% · Decision: {decision} · Risk: {risk_level || riskLevel}
-            {hallucination_score && hallucinationScore > 0.3 && ` · ⚠ ${Math.round(hallucinationScore * 100)}% claims unsupported`}
+            Confidence: {Math.round(confidence * 100)}% · Decision: {decision} · Risk: {riskLevel}
+            {hallucinationScore != null && hallucinationScore > 0.3 && ` · ⚠ ${Math.round(hallucinationScore * 100)}% claims unsupported`}
           </div>
         )}
       </div>

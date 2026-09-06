@@ -149,7 +149,7 @@ class ChromaVectorStore(BaseVectorStore):
         )
         self._chunks_map: dict[str, EvidenceChunk] = {}
 
-    def add(self, chunks: list[EvidenceChunk], embeddings: np.ndarray) -> None:
+    def add(self, chunks: list[EvidenceChunk], embeddings: np.ndarray, batch_size: int = 4000) -> None:
         if not chunks:
             return
         embs = embeddings.astype(np.float32).tolist()
@@ -165,12 +165,15 @@ class ChromaVectorStore(BaseVectorStore):
             for c in chunks
         ]
 
-        self._collection.upsert(
-            ids=ids,
-            embeddings=embs,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        total = len(chunks)
+        for i in range(0, total, batch_size):
+            end_idx = min(i + batch_size, total)
+            self._collection.upsert(
+                ids=ids[i:end_idx],
+                embeddings=embs[i:end_idx],
+                documents=documents[i:end_idx],
+                metadatas=metadatas[i:end_idx],
+            )
         for i, c in zip(ids, chunks):
             self._chunks_map[i] = c
 

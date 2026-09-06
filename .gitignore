@@ -61,6 +61,7 @@ experiments/runs/
 experiments/results/*.csv
 experiments/results/*.json
 !experiments/results/.gitkeep
+experiments
 
 # Paper
 paper/*.aux
@@ -70,3 +71,11 @@ paper/*.log
 paper/*.synctex.gz
 paper/*.out
 paper/*.toc
+
+
+#scripts
+scripts
+
+# Archives
+*.zip
+
