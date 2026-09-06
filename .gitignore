@@ -61,7 +61,8 @@ experiments/runs/
 experiments/results/*.csv
 experiments/results/*.json
 !experiments/results/.gitkeep
-experiments
+/experiments/
+
 
 # Paper
 paper/*.aux

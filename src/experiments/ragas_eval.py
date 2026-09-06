@@ -82,6 +82,22 @@ def get_ragas_judge(pipe: Any = None, hf_token: str | None = None, model_name: s
     return HFAPIJudge(model_name, hf_token).llm
 
 
+def get_ragas_embeddings(model_name: str = "BAAI/bge-small-en-v1.5"):
+    """Get open-source Hugging Face embeddings wrapper for RAGAS evaluation (0 OpenAI calls)."""
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info("Initializing Hugging Face embeddings for RAGAS (%s on %s)...", model_name, device)
+    hf_emb = HuggingFaceEmbeddings(
+        model_name=model_name,
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+    return LangchainEmbeddingsWrapper(hf_emb)
+
+
 def run_ragas_eval(
     queries: list[str],
     answers: list[str],
@@ -90,8 +106,9 @@ def run_ragas_eval(
     pipe: Any = None,
     hf_token: str | None = None,
     judge_model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    embedding_model: str = "BAAI/bge-small-en-v1.5",
 ) -> dict[str, float]:
-    """Run RAGAS evaluation over a set of query/response pairs."""
+    """Run RAGAS evaluation over a set of query/response pairs using 100% open-source models."""
     from datasets import Dataset
     from ragas import evaluate
     from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
@@ -106,17 +123,19 @@ def run_ragas_eval(
 
     dataset = Dataset.from_dict(data)
     judge_llm = get_ragas_judge(pipe=pipe, hf_token=hf_token, model_name=judge_model)
+    judge_embeddings = get_ragas_embeddings(model_name=embedding_model)
 
     metrics = [faithfulness, answer_relevancy]
     if ground_truths:
         metrics.extend([context_precision, context_recall])
 
-    logger.info("Running RAGAS evaluation with %d samples...", len(queries))
+    logger.info("Running RAGAS evaluation with %d samples on Hugging Face models...", len(queries))
     try:
         results = evaluate(
             dataset,
             metrics=metrics,
             llm=judge_llm,
+            embeddings=judge_embeddings,
         )
         return dict(results)
     except Exception as exc:
@@ -136,6 +155,7 @@ def main():
     parser.add_argument("--mode", type=str, default="mock", choices=["mock", "kaggle_fp16", "hf_api"])
     parser.add_argument("--output", type=str, default="experiments/results/ragas_results.json")
     parser.add_argument("--judge-model", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model to use for RAGAS judge")
+    parser.add_argument("--embedding-model", type=str, default="BAAI/bge-small-en-v1.5", help="Hugging Face embedding model for RAGAS")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -173,6 +193,7 @@ def main():
             contexts=sample_contexts,
             pipe=pipe,
             judge_model=args.judge_model,
+            embedding_model=args.embedding_model,
         )
     elif args.mode == "hf_api":
         # Local dev: use HF Inference API (0 local VRAM)
@@ -189,6 +210,7 @@ def main():
             contexts=sample_contexts,
             hf_token=hf_token,
             judge_model=args.judge_model,
+            embedding_model=args.embedding_model,
         )
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

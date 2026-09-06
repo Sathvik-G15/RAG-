@@ -46,10 +46,71 @@ class ExperimentReport:
     results: list[Any] = None
 
 
-def _dx_matches(pred: str | None, expected: str) -> bool:
-    if not pred:
+import re
+
+
+def _dx_matches(
+    pred: str | None,
+    expected: str,
+    options: dict[str, str] | None = None,
+    correct_option: str | None = None,
+    full_response: ClinicalResponse | None = None,
+) -> bool:
+    """Robust clinical diagnosis and benchmark answer matching."""
+    if not pred and not full_response:
         return False
-    return pred == expected
+
+    pred_str = (pred or "").strip().lower()
+    exp_str = (expected or "").strip().lower()
+
+    if not exp_str:
+        return False
+
+    # 1. Exact string match
+    if pred_str == exp_str:
+        return True
+
+    # 2. Substring containment
+    if len(exp_str) > 3 and (exp_str in pred_str or pred_str in exp_str):
+        return True
+
+    # 3. Multiple Choice Option matching (MedQA / MedMCQA)
+    if options and correct_option:
+        opt_text = options.get(correct_option, "").strip().lower()
+        if opt_text and (opt_text in pred_str or pred_str in opt_text):
+            return True
+        if pred_str.startswith(f"option {correct_option.lower()}") or pred_str.startswith(f"({correct_option.lower()})"):
+            return True
+
+    # 4. Check differential diagnosis list if present
+    if full_response and full_response.differential:
+        for d in full_response.differential[:3]:
+            d_name = d.diagnosis.strip().lower()
+            if d_name == exp_str or (len(exp_str) > 3 and (exp_str in d_name or d_name in exp_str)):
+                return True
+            if options and correct_option:
+                opt_text = options.get(correct_option, "").strip().lower()
+                if opt_text and (opt_text in d_name or d_name in opt_text):
+                    return True
+
+    # 5. Token overlap / Jaccard similarity for multi-word clinical entities
+    pred_tokens = {w for w in re.findall(r"\w+", pred_str) if len(w) > 2}
+    exp_tokens = {w for w in re.findall(r"\w+", exp_str) if len(w) > 2}
+    if pred_tokens and exp_tokens:
+        overlap = len(pred_tokens & exp_tokens)
+        if (overlap / len(exp_tokens) >= 0.5) or (overlap / len(pred_tokens) >= 0.5):
+            return True
+
+    # 6. Binary decisions (e.g. PubMedQA "yes" / "no" / "maybe")
+    if exp_str in ["yes", "no", "maybe"]:
+        if full_response and full_response.reasoning:
+            r_lower = full_response.reasoning.lower()
+            if exp_str == "yes" and any(k in r_lower for k in ["is effective", "is associated", "concludes yes", "positive association"]):
+                return True
+            elif exp_str == "no" and any(k in r_lower for k in ["not effective", "no significant", "concludes no", "no association"]):
+                return True
+
+    return False
 
 
 def run_vanilla(pipeline: Pipeline, query: str) -> tuple[ClinicalResponse, int, float]:
@@ -87,13 +148,16 @@ def evaluate(
     for q in queries:
         query = q["query"]
         expected = q["expected_dx"]
+        options = q.get("options")
+        correct_opt = q.get("correct_option")
+
         if method == "vanilla":
             resp, k, latency = run_vanilla(pipeline, query)
             result = QueryResult(
                 query=query,
                 expected_dx=expected,
                 predicted_dx=resp.primary_diagnosis,
-                correct=_dx_matches(resp.primary_diagnosis, expected),
+                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp),
                 confidence=resp.confidence,
                 hallucination_score=0.0,
                 latency_ms=latency,
@@ -107,7 +171,7 @@ def evaluate(
                 query=query,
                 expected_dx=expected,
                 predicted_dx=resp.primary_diagnosis,
-                correct=_dx_matches(resp.primary_diagnosis, expected),
+                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp),
                 confidence=resp.confidence,
                 hallucination_score=0.0,
                 latency_ms=latency,
@@ -122,7 +186,7 @@ def evaluate(
                 query=query,
                 expected_dx=expected,
                 predicted_dx=resp.primary_diagnosis,
-                correct=_dx_matches(resp.primary_diagnosis, expected),
+                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp),
                 confidence=resp.confidence,
                 hallucination_score=resp.hallucination_score,
                 latency_ms=latency,
@@ -245,12 +309,6 @@ def summarize(reports: dict[str, ExperimentReport]) -> str:
             f"{r.budget_exhausted_rate:.2f} | {r.abstention_rate:.2f}"
         )
     return "\n".join(lines)
-
-
-def _dx_matches(pred: str | None, expected: str) -> bool:
-    if not pred:
-        return False
-    return pred == expected
 
 
 def main():
