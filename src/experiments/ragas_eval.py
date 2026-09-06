@@ -107,11 +107,14 @@ def run_ragas_eval(
     hf_token: str | None = None,
     judge_model: str = "meta-llama/Llama-3.1-8B-Instruct",
     embedding_model: str = "BAAI/bge-small-en-v1.5",
+    max_workers: int = 2,
+    timeout: int = 600,
 ) -> dict[str, float]:
     """Run RAGAS evaluation over a set of query/response pairs using 100% open-source models."""
     from datasets import Dataset
     from ragas import evaluate
     from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
+    from ragas.run_config import RunConfig
 
     data = {
         "question": queries,
@@ -129,15 +132,38 @@ def run_ragas_eval(
     if ground_truths:
         metrics.extend([context_precision, context_recall])
 
-    logger.info("Running RAGAS evaluation with %d samples on Hugging Face models...", len(queries))
+    run_config = RunConfig(
+        timeout=timeout,
+        max_workers=max_workers,
+        max_retries=5,
+        max_wait=30,
+    )
+
+    logger.info(
+        "Running RAGAS evaluation with %d samples (max_workers=%d, timeout=%ds)...",
+        len(queries), max_workers, timeout
+    )
     try:
         results = evaluate(
             dataset,
             metrics=metrics,
             llm=judge_llm,
             embeddings=judge_embeddings,
+            run_config=run_config,
+            raise_exceptions=False,
+            show_progress=True,
         )
-        return dict(results)
+        out_dict = {}
+        for k, v in dict(results).items():
+            try:
+                val = float(v)
+                if not (val != val):  # check not NaN
+                    out_dict[k] = val
+                else:
+                    out_dict[k] = 0.0
+            except (ValueError, TypeError):
+                out_dict[k] = 0.0
+        return out_dict
     except Exception as exc:
         logger.warning("RAGAS evaluate encountered an error: %s. Using fallback score estimation.", exc)
         return {
@@ -156,6 +182,8 @@ def main():
     parser.add_argument("--output", type=str, default="experiments/results/ragas_results.json")
     parser.add_argument("--judge-model", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model to use for RAGAS judge")
     parser.add_argument("--embedding-model", type=str, default="BAAI/bge-small-en-v1.5", help="Hugging Face embedding model for RAGAS")
+    parser.add_argument("--max-workers", type=int, default=2, help="Max concurrent evaluation workers (keep <= 2 for GPU)")
+    parser.add_argument("--timeout", type=int, default=600, help="Timeout in seconds per evaluation job")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -194,6 +222,8 @@ def main():
             pipe=pipe,
             judge_model=args.judge_model,
             embedding_model=args.embedding_model,
+            max_workers=args.max_workers,
+            timeout=args.timeout,
         )
     elif args.mode == "hf_api":
         # Local dev: use HF Inference API (0 local VRAM)
@@ -211,6 +241,8 @@ def main():
             hf_token=hf_token,
             judge_model=args.judge_model,
             embedding_model=args.embedding_model,
+            max_workers=args.max_workers,
+            timeout=args.timeout,
         )
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
