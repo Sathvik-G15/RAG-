@@ -14,6 +14,7 @@ from ..confidence.aeb import AEBResult
 from ..confidence.pipeline import Pipeline
 from ..data.benchmarks import get_benchmark
 from ..models import ClinicalResponse
+from ..utils.disk_utils import cleanup_after_step, cleanup_gpu_memory, format_progress, safe_save
 
 
 @dataclass
@@ -150,9 +151,11 @@ def evaluate(
     queries: Sequence[dict],
     method: str = "aeb",
     confidence_threshold: float = 0.85,
+    gc_after_each: bool = False,
 ) -> ExperimentReport:
     results: list[QueryResult] = []
-    for q in queries:
+    t_start = time.perf_counter()
+    for idx, q in enumerate(queries):
         query = q["query"]
         expected = q["expected_dx"]
         options = q.get("options")
@@ -204,6 +207,15 @@ def evaluate(
             )
         results.append(result)
 
+        # Progress logging (every 5 queries or last query)
+        elapsed = time.perf_counter() - t_start
+        if (idx + 1) % 5 == 0 or idx == len(queries) - 1:
+            print(f"  [{method}] {format_progress(idx + 1, len(queries), elapsed)}")
+
+        # Optional memory cleanup
+        if gc_after_each:
+            cleanup_gpu_memory(log_prefix=f"{method}-q{idx+1}")
+
     n = len(results)
     report = ExperimentReport(
         method=method,
@@ -251,9 +263,13 @@ def run_threshold_sweep(
             "hallucination_rate": [r.avg_hallucination for r in reports],
             "avg_k": [r.avg_retrieval_k for r in reports],
         }
-        (out_dir / "threshold_sweep.json").write_text(
-            json.dumps(sweep_data, indent=2, default=str)
-        )
+        try:
+            safe_save(
+                json.dumps(sweep_data, indent=2, default=str),
+                out_dir / "threshold_sweep.json",
+            )
+        except OSError as e:
+            print(f"⚠️  Could not save threshold sweep: {e}")
     
     return reports
 
@@ -287,9 +303,14 @@ def run_all(
         for method in ("vanilla", "hybrid", "aeb"):
             report = evaluate(pipeline, queries, method=method)
             bench_results[method] = report
-            (out_dir / f"report_{bench_name}_{method}.json").write_text(
-                json.dumps(asdict(report), indent=2, default=str)
-            )
+            try:
+                safe_save(
+                    json.dumps(asdict(report), indent=2, default=str),
+                    out_dir / f"report_{bench_name}_{method}.json",
+                )
+            except OSError as e:
+                print(f"⚠️  Could not save {bench_name}/{method}: {e}")
+            cleanup_after_step(f"{bench_name}-{method}")
         all_results[bench_name] = bench_results
     
     # 2. Run threshold sweep on AEB
@@ -336,6 +357,8 @@ def main():
     parser.add_argument("--thresholds", nargs="+", type=float, 
                         default=[0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95],
                         help="Confidence thresholds for sweep")
+    parser.add_argument("--gc-after-each", action="store_true",
+                        help="Run GPU memory + GC cleanup after each query (slower but prevents OOM)")
     
     args = parser.parse_args()
     
@@ -359,16 +382,33 @@ def main():
         print(f"\n=== Evaluating on {bench_name.upper()} ({len(queries)} queries) ===")
         bench_results = {}
         for method in ("vanilla", "hybrid", "aeb"):
-            report = evaluate(pipeline, queries, method=method)
+            report = evaluate(pipeline, queries, method=method, gc_after_each=args.gc_after_each)
             bench_results[method] = report
-            (Path(args.output) / f"report_{bench_name}_{method}.json").write_text(
-                json.dumps(asdict(report), indent=2, default=str)
-            )
+            # Safe-save individual report
+            report_path = Path(args.output) / f"report_{bench_name}_{method}.json"
+            try:
+                safe_save(
+                    json.dumps(asdict(report), indent=2, default=str),
+                    report_path,
+                )
+            except OSError as e:
+                print(f"⚠️  Could not save {report_path.name}: {e}")
+
+            # Cleanup between methods
+            cleanup_after_step(f"{bench_name}-{method}")
+
         all_results[bench_name] = bench_results
     
     # Save combined results
     combined_path = Path(args.output) / "eval_combined.json"
-    combined_path.write_text(json.dumps(all_results, indent=2, default=str))
+    try:
+        safe_save(
+            json.dumps(all_results, indent=2, default=str),
+            combined_path,
+        )
+    except OSError as e:
+        print(f"⚠️  Could not save combined results: {e}")
+        print(json.dumps(all_results, indent=2, default=str))
     
     # Run threshold sweep if requested
     if args.threshold_sweep:

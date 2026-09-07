@@ -30,6 +30,23 @@ def get_kb_config() -> dict[str, Any]:
     return load_yaml(CONFIGS_DIR / "kb.yaml")
 
 
+# Kaggle-safe defaults: reduced workload to fit within T4 time + disk limits
+KAGGLE_SAFE_DEFAULTS = {
+    "n_queries": 50,               # Queries per benchmark (down from 200)
+    "max_new_tokens": 128,         # Reduced from 256/512 to speed up inference
+    "ragas_max_workers": 1,        # Sequential GPU inference prevents OOM
+    "ragas_timeout": 1800,         # 30 min generous timeout per RAGAS job
+    "ingest_limit": 2000,          # Guideline articles to ingest (down from 5000)
+    "benchmarks": ["medqa"],       # Default to single benchmark for safety
+    "skip_threshold_sweep": True,  # Skip by default; run separately if time allows
+    "skip_embedding_ablation": True,
+    "hf_cache_keep_models": [      # Models to keep when cleaning HF cache
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "BAAI/bge-small-en-v1.5",
+    ],
+}
+
+
 class AEBConfig(BaseModel):
     initial_k: int = 3
     step_k: int = 3
@@ -111,8 +128,12 @@ def detect_hardware() -> dict[str, Any]:
     # Disk space check
     free_gb = shutil.disk_usage(".").free / (1024**3)
     disk_warning = None
-    if free_gb < 25.0:
-        disk_warning = f"Warning: {free_gb:.1f} GB free disk space (recommend >= 25 GB for full corpus + models)."
+    if free_gb < 2.0:
+        disk_warning = f"🛑 CRITICAL: {free_gb:.1f} GB free disk space — high risk of ENOSPC errors! Clean HF cache or reduce workload."
+    elif free_gb < 5.0:
+        disk_warning = f"⚠️  Low disk: {free_gb:.1f} GB free. Expect issues with large model downloads. Consider cleanup_hf_cache()."
+    elif free_gb < 25.0:
+        disk_warning = f"ℹ️  {free_gb:.1f} GB free (recommend >= 25 GB for full corpus + models)."
 
     try:
         import torch

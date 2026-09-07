@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import time
 from pathlib import Path
 import sys
 import types
@@ -191,13 +192,14 @@ def run_ragas_eval(
 def main():
     parser = argparse.ArgumentParser(description="Run RAGAS evaluation on CAAR-CDSS")
     parser.add_argument("--benchmark", type=str, default="medqa", choices=["medqa", "pubmedqa", "seeds"])
-    parser.add_argument("--n", type=int, default=10, help="Number of samples to evaluate")
+    parser.add_argument("--n", type=int, default=50, help="Number of samples to evaluate")
     parser.add_argument("--mode", type=str, default="mock", choices=["mock", "kaggle_fp16", "hf_api"])
     parser.add_argument("--output", type=str, default="experiments/results/ragas_results.json")
     parser.add_argument("--judge-model", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model to use for RAGAS judge")
     parser.add_argument("--embedding-model", type=str, default="BAAI/bge-small-en-v1.5", help="Hugging Face embedding model for RAGAS")
     parser.add_argument("--max-workers", type=int, default=2, help="Max concurrent evaluation workers (keep <= 2 for GPU)")
     parser.add_argument("--timeout", type=int, default=600, help="Timeout in seconds per evaluation job")
+    parser.add_argument("--gc-after-each", action="store_true", help="Run GPU memory + GC cleanup after each query (slower but prevents OOM)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -225,8 +227,11 @@ def main():
         sample_contexts = []
         sample_ground_truths = []
         
+        from ..utils.disk_utils import cleanup_after_step, format_progress
+
         logger.info("Generating CDSS responses for %d benchmark queries...", len(queries_data))
-        for item in queries_data:
+        t_start = time.perf_counter()
+        for idx, item in enumerate(queries_data):
             q_text = item["query"]
             try:
                 _, resp = pipeline_obj.analyze(q_text)
@@ -237,6 +242,15 @@ def main():
                 sample_ground_truths.append(item.get("expected_dx", ""))
             except Exception:
                 continue
+
+            # Progress logging
+            elapsed = time.perf_counter() - t_start
+            if (idx + 1) % 5 == 0 or idx == len(queries_data) - 1:
+                logger.info("Response gen: %s", format_progress(idx + 1, len(queries_data), elapsed))
+
+            # Optional memory cleanup
+            if getattr(args, "gc_after_each", False):
+                cleanup_after_step(f"query-{idx+1}")
     else:
         sample_queries = ["What is the first-line treatment for community acquired pneumonia?"] * args.n
         sample_answers = ["First line treatment for uncomplicated community-acquired pneumonia in outpatients is amoxicillin or a macrolide."] * args.n
@@ -303,7 +317,16 @@ def main():
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(res, indent=2))
+
+    # Safe-save with disk space pre-check
+    from ..utils.disk_utils import safe_save
+    try:
+        safe_save(json.dumps(res, indent=2), out_path)
+    except OSError as e:
+        logger.error("Failed to save results: %s", e)
+        # Print results to stdout as fallback
+        print(json.dumps(res, indent=2))
+
     print("\n--- RAGAS Evaluation Results ---")
     for k, v in res.items():
         print(f"{k}: {v:.4f}")
