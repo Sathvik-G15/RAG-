@@ -351,7 +351,8 @@ def main():
                         choices=["medqa", "pubmedqa", "medmcqa", "seeds"],
                         help="Benchmarks to run")
     parser.add_argument("--n", type=int, default=200, help="Number of queries per benchmark")
-    parser.add_argument("--output", type=str, default="experiments/results", help="Output directory")
+    parser.add_argument("--output", "--output-dir", dest="output", type=str, default="experiments/results", help="Output directory")
+    parser.add_argument("--chroma-dir", type=str, default=None, help="Path to pre-ingested ChromaDB directory")
     parser.add_argument("--threshold-sweep", action="store_true", help="Run threshold sweep for abstention curve")
     parser.add_argument("--embedding-ablation", action="store_true", help="Run embedding model ablation")
     parser.add_argument("--thresholds", nargs="+", type=float, 
@@ -362,7 +363,11 @@ def main():
     
     args = parser.parse_args()
     
-    pipeline = Pipeline.from_seed()
+    prefer_real = (args.mode != "mock")
+    if args.chroma_dir and Path(args.chroma_dir).exists():
+        pipeline = Pipeline.from_corpus(chroma_dir=args.chroma_dir, prefer_real=prefer_real)
+    else:
+        pipeline = Pipeline.from_seed(prefer_real=prefer_real)
     
     # Determine queries based on benchmarks
     all_queries = {}

@@ -193,14 +193,18 @@ def main():
     parser = argparse.ArgumentParser(description="Run RAGAS evaluation on CAAR-CDSS")
     parser.add_argument("--benchmark", type=str, default="medqa", choices=["medqa", "pubmedqa", "seeds"])
     parser.add_argument("--n", type=int, default=50, help="Number of samples to evaluate")
-    parser.add_argument("--mode", type=str, default="mock", choices=["mock", "kaggle_fp16", "hf_api"])
-    parser.add_argument("--output", type=str, default="experiments/results/ragas_results.json")
+    parser.add_argument("--mode", type=str, default="mock", choices=["mock", "kaggle_fp16", "hf_api", "both", "real", "local_4bit"])
+    parser.add_argument("--output", "--output-dir", dest="output", type=str, default="experiments/results/ragas_results.json")
     parser.add_argument("--judge-model", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model to use for RAGAS judge")
     parser.add_argument("--embedding-model", type=str, default="BAAI/bge-small-en-v1.5", help="Hugging Face embedding model for RAGAS")
     parser.add_argument("--max-workers", type=int, default=2, help="Max concurrent evaluation workers (keep <= 2 for GPU)")
     parser.add_argument("--timeout", type=int, default=600, help="Timeout in seconds per evaluation job")
     parser.add_argument("--gc-after-each", action="store_true", help="Run GPU memory + GC cleanup after each query (slower but prevents OOM)")
     args = parser.parse_args()
+
+    # Normalise mode alias if both/real was passed
+    if args.mode in ("both", "real"):
+        args.mode = "kaggle_fp16"
 
     logging.basicConfig(level=logging.INFO)
     logger.info("Evaluating %d samples on %s benchmark (mode=%s)...", args.n, args.benchmark, args.mode)
@@ -316,7 +320,11 @@ def main():
         raise ValueError(f"Unknown mode: {args.mode}")
 
     out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.is_dir() or not out_path.suffix:
+        out_path.mkdir(parents=True, exist_ok=True)
+        out_path = out_path / f"ragas_{args.benchmark}_results.json"
+    else:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Safe-save with disk space pre-check
     from ..utils.disk_utils import safe_save
