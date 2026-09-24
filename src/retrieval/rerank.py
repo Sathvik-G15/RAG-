@@ -85,9 +85,10 @@ class CrossEncoderReranker(BaseReranker):
 
 
 def make_reranker(prefer_real: bool = False, model_name: str | None = None) -> BaseReranker:
-    if prefer_real and model_name:
-        try:
-            return CrossEncoderReranker(model_name=model_name)
-        except Exception:
-            pass
-    return OverlapReranker()
+    """Factory that creates OverlapReranker or CrossEncoderReranker.
+    
+    If prefer_real=True and model_name provided, failures will raise.
+    """
+    if not prefer_real or not model_name:
+        return OverlapReranker()
+    return CrossEncoderReranker(model_name=model_name)

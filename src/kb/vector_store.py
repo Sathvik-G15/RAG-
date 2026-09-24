@@ -226,15 +226,16 @@ class ChromaVectorStore(BaseVectorStore):
 
 
 def make_vector_store(backend: str = "memory", persist_dir: str | Path = "data/chroma_db") -> BaseVectorStore:
+    """Factory that creates the requested vector store backend.
+    
+    If backend is explicitly requested (not "memory"), failures will raise.
+    """
     if backend == "chroma":
-        try:
-            return ChromaVectorStore(persist_dir=persist_dir)
-        except ImportError:
-            return InMemoryVectorStore()
+        return ChromaVectorStore(persist_dir=persist_dir)
     elif backend == "faiss":
-        try:
-            return FAISSVectorStore()
-        except ImportError:
-            return InMemoryVectorStore()
-    return InMemoryVectorStore()
+        return FAISSVectorStore()
+    elif backend == "memory":
+        return InMemoryVectorStore()
+    else:
+        raise ValueError(f"Unknown vector store backend: {backend}")
 

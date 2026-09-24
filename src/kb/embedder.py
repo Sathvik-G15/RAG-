@@ -108,16 +108,15 @@ class BGE_M3Embedder(BaseEmbedder):
 
 
 def make_embedder(model_name: str | None = None, prefer_real: bool = True) -> BaseEmbedder:
-    """Factory that picks the real embedder if available, else hash fallback."""
-    if prefer_real and model_name:
-        if "bge-m3" in model_name.lower():
-            try:
-                return BGE_M3Embedder(model_name=model_name)
-            except Exception:
-                pass
-        try:
-            return SentenceTransformerEmbedder(model_name=model_name)
-        except Exception:
-            pass
-    return HashEmbedder()
+    """Factory that picks the real embedder if available.
+    
+    If prefer_real=True and model_name provided, failures will raise.
+    """
+    if not prefer_real or not model_name:
+        return HashEmbedder()
+
+    if "bge-m3" in model_name.lower():
+        return BGE_M3Embedder(model_name=model_name)
+
+    return SentenceTransformerEmbedder(model_name=model_name)
 

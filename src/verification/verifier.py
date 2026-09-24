@@ -217,12 +217,13 @@ def verify_response(
 
 
 def make_verifier(prefer_real: bool = False, model_name: str | None = None) -> object:
-    if prefer_real and model_name:
-        try:
-            return DeBERTaVerifier(model_name=model_name)
-        except Exception:
-            pass
-    return LexicalVerifier()
+    """Factory that creates LexicalVerifier or DeBERTaVerifier.
+    
+    If prefer_real=True and model_name provided, failures will raise.
+    """
+    if not prefer_real or not model_name:
+        return LexicalVerifier()
+    return DeBERTaVerifier(model_name=model_name)
 
 
 def verify_response(
@@ -233,12 +234,3 @@ def verify_response(
     if verifier is None:
         verifier = VerifierFactory.get_verifier()
     return verifier.verify(response.reasoning, evidence)
-
-
-def make_verifier(prefer_real: bool = False, model_name: str | None = None) -> object:
-    if prefer_real and model_name:
-        try:
-            return DeBERTaVerifier(model_name=model_name)
-        except Exception:
-            pass
-    return LexicalVerifier()
