@@ -140,21 +140,21 @@ class DeBERTaVerifier:
 
     def _load(self):
         import torch
-        from transformers import pipeline
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
-        kwargs = {}
-        if torch.cuda.is_available():
-            kwargs["torch_dtype"] = torch.float16
-            # Use explicit device ID (GPU 1 if multi-GPU, else GPU 0)
-            # Avoids accelerate device_map='auto' deadlock with DeBERTa-v3 relative position embeddings
-            target_device = 1 if torch.cuda.device_count() > 1 else 0
-            kwargs["device"] = target_device
+        target_device = "cuda:1" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else ("cuda:0" if torch.cuda.is_available() else "cpu")
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name,
+            torch_dtype=torch.float16 if "cuda" in target_device else torch.float32,
+            low_cpu_mem_usage=False,
+        ).to(target_device)
 
         self._pipe = pipeline(
             "text-classification",
-            model=self.model_name,
+            model=model,
+            tokenizer=tokenizer,
             top_k=None,
-            **kwargs,
         )
 
     def verify(self, reasoning: str, evidence: Sequence[EvidenceChunk]) -> VerificationResult:
@@ -200,24 +200,14 @@ class DeBERTaVerifier:
 
 
 class VerifierFactory:
-    """Factory that routes to the appropriate verifier based on hardware.
+    """Factory that routes to the appropriate verifier.
     
-    - Local (6GB VRAM): LexicalVerifier (deterministic, 0 VRAM)
-    - Kaggle (16GB T4): DeBERTaVerifier (local fp16)
-    - CI/No GPU: LexicalVerifier (deterministic fallback)
+    Defaults to LexicalVerifier for fast, deterministic, zero-VRAM verification.
     """
 
     @staticmethod
     def get_verifier() -> object:
-        hw = detect_hardware()
-        vram_gb = hw.get("vram_gb", 0)
-
-        if vram_gb >= 12:
-            # Kaggle T4 (16GB) or high VRAM GPU - use local DeBERTa
-            return DeBERTaVerifier()
-        else:
-            # Local dev (6GB or less) or CI - use lexical verifier
-            return LexicalVerifier()
+        return LexicalVerifier()
 
 
 def verify_response(
