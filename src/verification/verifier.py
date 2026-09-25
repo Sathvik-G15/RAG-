@@ -139,9 +139,20 @@ class DeBERTaVerifier:
         self._pipe = None
 
     def _load(self):
+        import torch
         from transformers import pipeline
 
-        self._pipe = pipeline("text-classification", model=self.model_name, top_k=None)
+        kwargs = {}
+        if torch.cuda.is_available():
+            kwargs["torch_dtype"] = torch.float16
+            kwargs["device_map"] = "auto"
+
+        self._pipe = pipeline(
+            "text-classification",
+            model=self.model_name,
+            top_k=None,
+            **kwargs,
+        )
 
     def verify(self, reasoning: str, evidence: Sequence[EvidenceChunk]) -> VerificationResult:
         if self._pipe is None:
