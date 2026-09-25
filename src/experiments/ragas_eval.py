@@ -180,13 +180,8 @@ def run_ragas_eval(
             return out_dict
         raise ValueError(f"No metric scores found in evaluation result: {results}")
     except Exception as exc:
-        logger.warning("RAGAS evaluate encountered an error: %s. Using fallback score estimation.", exc)
-        return {
-            "faithfulness": 0.924,
-            "answer_relevancy": 0.908,
-            "context_precision": 0.885,
-            "context_recall": 0.871,
-        }
+        logger.error("RAGAS evaluate failed: %s", exc, exc_info=True)
+        raise
 
 
 def main():
@@ -262,12 +257,7 @@ def main():
         sample_ground_truths = ["amoxicillin"] * args.n
 
     if args.mode == "mock":
-        res = {
-            "faithfulness": 0.942,
-            "answer_relevancy": 0.915,
-            "context_precision": 0.880,
-            "context_recall": 0.865,
-        }
+        raise RuntimeError("Mock mode not supported for RAGAS evaluation. Use --mode hf_api, kaggle_fp16, or local_4bit for real evaluation.")
     elif args.mode == "kaggle_fp16":
         # On Kaggle: load fp16 model and reuse as judge (0 API calls, sequential worker=1 to prevent GPU timeout)
         import torch
