@@ -145,7 +145,10 @@ class DeBERTaVerifier:
         kwargs = {}
         if torch.cuda.is_available():
             kwargs["torch_dtype"] = torch.float16
-            kwargs["device_map"] = "auto"
+            # Use explicit device ID (GPU 1 if multi-GPU, else GPU 0)
+            # Avoids accelerate device_map='auto' deadlock with DeBERTa-v3 relative position embeddings
+            target_device = 1 if torch.cuda.device_count() > 1 else 0
+            kwargs["device"] = target_device
 
         self._pipe = pipeline(
             "text-classification",
