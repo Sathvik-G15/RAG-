@@ -85,20 +85,142 @@ def get_ragas_judge(pipe: Any = None, hf_token: str | None = None, model_name: s
     return HFAPIJudge(model_name, hf_token, provider=provider).llm
 
 
-def get_ragas_embeddings(model_name: str = "BAAI/bge-small-en-v1.5"):
-    """Get open-source Hugging Face embeddings wrapper for RAGAS evaluation (0 OpenAI calls)."""
+def get_ragas_embeddings(model_name: str = "BAAI/bge-small-en-v1.5", force_cpu: bool = True):
+    """Get open-source Hugging Face embeddings wrapper for RAGAS evaluation (0 OpenAI calls).
+
+    Args:
+        model_name: HuggingFace embedding model to use.
+        force_cpu: When True (default), always loads on CPU regardless of CUDA availability.
+            This prevents VRAM contention between bge-small and the pipeline/judge LLM,
+            which is the primary cause of Step-6 hangs on Kaggle T4.
+            Set to False only if you have confirmed spare VRAM (e.g. A100 with headroom).
+    """
     from langchain_community.embeddings import HuggingFaceEmbeddings
     from ragas.embeddings import LangchainEmbeddingsWrapper
     import torch
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info("Initializing Hugging Face embeddings for RAGAS (%s on %s)...", model_name, device)
+    if force_cpu:
+        device = "cpu"
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(
+        "Initializing Hugging Face embeddings for RAGAS (%s on %s, force_cpu=%s)...",
+        model_name, device, force_cpu,
+    )
     hf_emb = HuggingFaceEmbeddings(
         model_name=model_name,
         model_kwargs={"device": device},
         encode_kwargs={"normalize_embeddings": True},
     )
     return LangchainEmbeddingsWrapper(hf_emb)
+
+
+def log_resource_snapshot(label: str = "snapshot") -> dict:
+    """Capture GPU + RAM + top-process snapshot at the moment of a stall.
+
+    Call this in a notebook cell (or add to your loop) right when the pipeline
+    appears to hang.  Mirrors the three diagnostic commands from the debug guide::
+
+        nvidia-smi
+        free -h
+        ps aux --sort=-%mem | head -n 15
+
+    Returns a dict with keys ``gpu``, ``ram``, ``top_procs`` so callers can
+    also log / save the snapshot programmatically.
+    """
+    import platform
+    import subprocess
+    import sys
+
+    snapshot: dict = {"label": label}
+
+    # --- GPU via torch (cross-platform, always available if torch is installed) ---
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_info = []
+            for i in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(i)
+                alloc = torch.cuda.memory_allocated(i) / 1024 ** 3
+                reserved = torch.cuda.memory_reserved(i) / 1024 ** 3
+                total = props.total_memory / 1024 ** 3
+                gpu_info.append(
+                    {"device": i, "name": props.name,
+                     "allocated_gb": round(alloc, 2),
+                     "reserved_gb": round(reserved, 2),
+                     "total_gb": round(total, 2)}
+                )
+            snapshot["gpu"] = gpu_info
+            logger.info("[%s] GPU: %s", label, gpu_info)
+        else:
+            snapshot["gpu"] = "no_cuda"
+    except Exception as exc:
+        snapshot["gpu"] = f"error: {exc}"
+
+    # --- nvidia-smi (Linux / Kaggle) ---
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            snapshot["nvidia_smi"] = proc.stdout.strip()
+            logger.info("[%s] nvidia-smi:\n%s", label, snapshot["nvidia_smi"])
+    except Exception:
+        pass  # not available on Windows dev machines
+
+    # --- RAM (Linux: /proc/meminfo; Windows: psutil fallback) ---
+    try:
+        if platform.system() == "Linux":
+            mem_raw = Path("/proc/meminfo").read_text()
+            mem_lines = {line.split(":")[0]: line.split(":")[1].strip()
+                         for line in mem_raw.splitlines() if ":" in line}
+            snapshot["ram"] = {
+                "total": mem_lines.get("MemTotal"),
+                "free": mem_lines.get("MemFree"),
+                "available": mem_lines.get("MemAvailable"),
+                "buffers": mem_lines.get("Buffers"),
+                "cached": mem_lines.get("Cached"),
+            }
+        else:
+            import psutil  # type: ignore
+            vm = psutil.virtual_memory()
+            snapshot["ram"] = {
+                "total_gb": round(vm.total / 1024 ** 3, 1),
+                "available_gb": round(vm.available / 1024 ** 3, 1),
+                "percent_used": vm.percent,
+            }
+        logger.info("[%s] RAM: %s", label, snapshot["ram"])
+    except Exception as exc:
+        snapshot["ram"] = f"error: {exc}"
+
+    # --- Top processes by memory (Linux: ps aux; Windows: psutil) ---
+    try:
+        if platform.system() == "Linux":
+            proc = subprocess.run(
+                ["ps", "aux", "--sort=-%mem"],
+                capture_output=True, text=True, timeout=10,
+            )
+            lines = proc.stdout.splitlines()[:16]  # header + top 15
+            snapshot["top_procs"] = "\n".join(lines)
+        else:
+            import psutil  # type: ignore
+            procs = sorted(
+                psutil.process_iter(["pid", "name", "memory_percent"]),
+                key=lambda p: p.info["memory_percent"] or 0,
+                reverse=True,
+            )[:15]
+            snapshot["top_procs"] = [
+                {"pid": p.info["pid"], "name": p.info["name"],
+                 "mem_%": round(p.info["memory_percent"] or 0, 2)}
+                for p in procs
+            ]
+        logger.info("[%s] top_procs: %s", label, snapshot["top_procs"])
+    except Exception as exc:
+        snapshot["top_procs"] = f"error: {exc}"
+
+    return snapshot
 
 
 def run_ragas_eval(
@@ -222,7 +344,9 @@ def main():
 
     if queries_data:
         from ..confidence.pipeline import Pipeline
-        prefer_real = (args.mode != "mock")
+        # hf_api uses zero local models (all inference is remote); only kaggle_fp16
+        # and local_4bit actually need a real local LLM loaded into memory.
+        prefer_real = args.mode in ("kaggle_fp16", "local_4bit")
         pipeline_obj = Pipeline.from_seed(prefer_real=prefer_real)
         
         sample_queries = []
