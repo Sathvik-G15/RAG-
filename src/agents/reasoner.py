@@ -282,12 +282,18 @@ class OpenSourceLLMReasoner(BaseReasoner):
             )
         else:
             dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            pipe_kwargs = {
+                "torch_dtype": dtype,
+                "device_map": "auto" if torch.cuda.is_available() else None,
+                "max_new_tokens": self.max_new_tokens,
+            }
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                num_gpus = torch.cuda.device_count()
+                pipe_kwargs["max_memory"] = {i: "9GiB" for i in range(num_gpus)}
             self._pipe = pipeline(
                 "text-generation",
                 model=self.model_name,
-                torch_dtype=dtype,
-                device_map="auto" if torch.cuda.is_available() else None,
-                max_new_tokens=self.max_new_tokens,
+                **pipe_kwargs,
             )
 
     def generate(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:

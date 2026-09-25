@@ -154,9 +154,12 @@ def detect_hardware() -> dict[str, Any]:
                 "max_new_tokens": 256,
             }
 
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        num_gpus = torch.cuda.device_count()
+        vram_gb = sum(
+            torch.cuda.get_device_properties(i).total_memory for i in range(num_gpus)
+        ) / (1024**3)
         if vram_gb >= 20.0:
-            # Multi-GPU / A100 / Kaggle 2xT4
+            # Multi-GPU (e.g. Kaggle 2xT4 = ~30GB) / A100
             return {
                 "device": "cuda",
                 "vram_gb": round(vram_gb, 1),

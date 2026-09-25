@@ -269,13 +269,19 @@ def main():
         hf_logging.set_verbosity_error()
 
         logger.info("Loading %s in fp16 for KagglePipelineJudge...", args.judge_model)
+        judge_kwargs = {
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
+            "max_new_tokens": 256,
+            "return_full_text": False,
+        }
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            num_gpus = torch.cuda.device_count()
+            judge_kwargs["max_memory"] = {i: "9GiB" for i in range(num_gpus)}
         pipe = pipeline(
             "text-generation",
             model=args.judge_model,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            max_new_tokens=256,
-            return_full_text=False,
+            **judge_kwargs,
         )
         if hasattr(pipe, "tokenizer") and pipe.tokenizer and pipe.tokenizer.pad_token_id is None:
             pipe.tokenizer.pad_token_id = pipe.tokenizer.eos_token_id
