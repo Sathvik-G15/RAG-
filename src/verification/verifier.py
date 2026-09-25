@@ -151,7 +151,7 @@ class DeBERTaVerifier:
         self._model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name,
             torch_dtype=torch.float16 if "cuda" in target_device else torch.float32,
-            low_cpu_mem_usage=False,
+            low_cpu_mem_usage=True,
         ).to(target_device)
         self._model.eval()
         self._device = target_device

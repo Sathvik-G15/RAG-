@@ -288,8 +288,10 @@ class OpenSourceLLMReasoner(BaseReasoner):
                 "max_new_tokens": self.max_new_tokens,
             }
             if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-                num_gpus = torch.cuda.device_count()
-                pipe_kwargs["max_memory"] = {i: "9GiB" for i in range(num_gpus)}
+                # GPU 0 gets 9 GiB for Llama's large embedding/early layers.
+                # GPU 1 is capped at 7 GiB so DeBERTa-v3-large (~1.8 GiB fp16)
+                # can load onto cuda:1 without OOM.
+                pipe_kwargs["max_memory"] = {0: "9GiB", 1: "7GiB"}
             self._pipe = pipeline(
                 "text-generation",
                 model=self.model_name,
