@@ -137,7 +137,7 @@ class AEBPipeline:
             if confidence >= threshold:
                 stopped_by_threshold = True
                 break
-            if k >= max_k:
+            if k >= max_k or round_no >= cfg.max_rounds:
                 budget_exhausted = True
                 break
 

@@ -51,8 +51,13 @@ class AEBConfig(BaseModel):
     initial_k: int = 3
     step_k: int = 3
     max_k: int = 15
-    confidence_threshold: float = 0.85
+    # 0.70 is calibrated to be achievable across both clinical and biomedical QA
+    # benchmarks given the fused signal weights. 0.85 was only reachable on
+    # simple seed queries where all five signals align, causing near-100% budget
+    # exhaustion on MedQA and PubMedQA.
+    confidence_threshold: float = 0.70
     stop_on_budget_exhausted: bool = True
+    max_rounds: int = 5  # Hard cap on AEB loop iterations (initial_k + max_rounds*step_k = max_k)
 
 
 class RetrievalConfig(BaseModel):

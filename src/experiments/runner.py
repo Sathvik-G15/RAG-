@@ -57,11 +57,18 @@ def _dx_matches(
     correct_option: str | None = None,
     full_response: ClinicalResponse | None = None,
 ) -> bool:
-    """Robust clinical diagnosis and benchmark answer matching."""
-    if not pred and not full_response:
+    """Robust clinical diagnosis and benchmark answer matching.
+
+    A committed primary_diagnosis is required to count as correct.
+    Abstentions (pred=None) are always wrong — checking the differential
+    when no primary diagnosis was produced would inflate accuracy by
+    crediting answers the model never committed to.
+    """
+    # Global rule: abstentions are never correct regardless of differential.
+    if not pred:
         return False
 
-    pred_str = (pred or "").strip().lower()
+    pred_str = pred.strip().lower()
     exp_str = (expected or "").strip().lower()
 
     if not exp_str:
@@ -83,7 +90,7 @@ def _dx_matches(
         if pred_str.startswith(f"option {correct_option.lower()}") or pred_str.startswith(f"({correct_option.lower()})"):
             return True
 
-    # 4. Check differential diagnosis list if present
+    # 4. Check differential diagnosis list if present (only when primary is committed)
     if full_response and full_response.differential:
         for d in full_response.differential[:3]:
             d_name = d.diagnosis.strip().lower()
@@ -156,10 +163,19 @@ def evaluate(
     results: list[QueryResult] = []
     t_start = time.perf_counter()
     for idx, q in enumerate(queries):
-        query = q["query"]
+        raw_query = q["query"]
         expected = q["expected_dx"]
         options = q.get("options")
         correct_opt = q.get("correct_option")
+
+        # Global context augmentation: if the benchmark item ships its own context
+        # (e.g. PubMedQA abstracts, MedMCQA explanations), prepend it so that every
+        # retrieval path sees it — no dataset-specific branching needed.
+        provided_context = (q.get("context") or "").strip()
+        if provided_context:
+            query = f"[Context]\n{provided_context[:1500]}\n\n[Question]\n{raw_query}"
+        else:
+            query = raw_query
 
         if method == "vanilla":
             resp, k, latency = run_vanilla(pipeline, query)

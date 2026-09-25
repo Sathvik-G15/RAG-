@@ -84,6 +84,11 @@ class ConfidenceModel:
         self.temperature = max(0.1, temperature)
 
     def score(self, signals: ConfidenceSignals) -> float:
+        # Cap hallucination penalty at 0.5 so that a false-positive hallucination
+        # signal from an off-domain corpus (token-overlap near zero even for a
+        # factually correct response) cannot drive confidence to near-zero on its
+        # own. Real hallucinations still produce a meaningful penalty.
+        capped_hallucination = min(signals.hallucination_penalty, 0.5)
         weights = np.array(
             [self.w_retriever, self.w_evidence, self.w_agreement, self.w_llm, self.w_hallucination],
             dtype=np.float64,
@@ -94,7 +99,7 @@ class ConfidenceModel:
                 signals.evidence_sufficiency,
                 signals.support_agreement,
                 signals.raw_confidence,
-                1.0 - signals.hallucination_penalty,
+                1.0 - capped_hallucination,
             ],
             dtype=np.float64,
         )

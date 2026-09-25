@@ -225,12 +225,3 @@ def make_verifier(prefer_real: bool = False, model_name: str | None = None) -> o
         return LexicalVerifier()
     return DeBERTaVerifier(model_name=model_name)
 
-
-def verify_response(
-    response: ClinicalResponse,
-    evidence: Sequence[EvidenceChunk],
-    verifier: object | None = None,
-) -> VerificationResult:
-    if verifier is None:
-        verifier = VerifierFactory.get_verifier()
-    return verifier.verify(response.reasoning, evidence)
