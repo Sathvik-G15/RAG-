@@ -47,7 +47,7 @@ class HFAPIJudge:
     
     Uses serverless endpoint - zero local VRAM.
     """
-    def __init__(self, model_name: str, hf_token: str | None = None):
+    def __init__(self, model_name: str, hf_token: str | None = None, provider: str | None = "together"):
         from langchain_huggingface import HuggingFaceEndpoint
         from ragas.llms import LangchainLLMWrapper
 
@@ -55,12 +55,13 @@ class HFAPIJudge:
         if not token:
             raise ValueError("HF_TOKEN environment variable or parameter is required for HF Inference API judge.")
 
-        logger.info("Using Hugging Face Inference API judge (%s).", model_name)
+        logger.info("Using Hugging Face Inference API judge (%s) via provider=%s.", model_name, provider)
         endpoint = HuggingFaceEndpoint(
             repo_id=model_name,
             huggingfacehub_api_token=token,
             temperature=0.01,
             max_new_tokens=256,
+            provider=provider,
         )
         self._llm = LangchainLLMWrapper(endpoint)
 
@@ -69,7 +70,7 @@ class HFAPIJudge:
         return self._llm
 
 
-def get_ragas_judge(pipe: Any = None, hf_token: str | None = None, model_name: str = "meta-llama/Llama-3.1-8B-Instruct"):
+def get_ragas_judge(pipe: Any = None, hf_token: str | None = None, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", provider: str | None = "together"):
     """Get RAGAS judge wrapper.
     
     - If pipe is provided (e.g. on Kaggle T4), uses KagglePipelineJudge (0 API calls).
@@ -79,8 +80,8 @@ def get_ragas_judge(pipe: Any = None, hf_token: str | None = None, model_name: s
         logger.info("Using KagglePipelineJudge (reuses loaded fp16 model, 0 API calls).")
         return KagglePipelineJudge(pipe).llm
 
-    logger.info("Using HFAPIJudge via Hugging Face Inference API (%s).", model_name)
-    return HFAPIJudge(model_name, hf_token).llm
+    logger.info("Using HFAPIJudge via Hugging Face Inference API (%s) with provider=%s.", model_name, provider)
+    return HFAPIJudge(model_name, hf_token, provider=provider).llm
 
 
 def get_ragas_embeddings(model_name: str = "BAAI/bge-small-en-v1.5"):
@@ -108,6 +109,7 @@ def run_ragas_eval(
     hf_token: str | None = None,
     judge_model: str = "meta-llama/Llama-3.1-8B-Instruct",
     embedding_model: str = "BAAI/bge-small-en-v1.5",
+    provider: str | None = "together",
     max_workers: int = 2,
     timeout: int = 600,
 ) -> dict[str, float]:
@@ -126,7 +128,7 @@ def run_ragas_eval(
         data["ground_truth"] = ground_truths
 
     dataset = Dataset.from_dict(data)
-    judge_llm = get_ragas_judge(pipe=pipe, hf_token=hf_token, model_name=judge_model)
+    judge_llm = get_ragas_judge(pipe=pipe, hf_token=hf_token, model_name=judge_model, provider=provider)
     judge_embeddings = get_ragas_embeddings(model_name=embedding_model)
 
     metrics = [faithfulness, answer_relevancy]
@@ -192,6 +194,7 @@ def main():
     parser.add_argument("--output", "--output-dir", dest="output", type=str, default="experiments/results/ragas_results.json")
     parser.add_argument("--judge-model", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model to use for RAGAS judge")
     parser.add_argument("--embedding-model", type=str, default="BAAI/bge-small-en-v1.5", help="Hugging Face embedding model for RAGAS")
+    parser.add_argument("--provider", type=str, default="together", help="HF Inference API provider (together, fireworks, replicate, etc.)")
     parser.add_argument("--max-workers", type=int, default=2, help="Max concurrent evaluation workers (keep <= 2 for GPU)")
     parser.add_argument("--timeout", type=int, default=600, help="Timeout in seconds per evaluation job")
     parser.add_argument("--gc-after-each", action="store_true", help="Run GPU memory + GC cleanup after each query (slower but prevents OOM)")
@@ -303,6 +306,7 @@ def main():
             hf_token=hf_token,
             judge_model=args.judge_model,
             embedding_model=args.embedding_model,
+            provider=args.provider,
             max_workers=args.max_workers,
             timeout=args.timeout,
         )
