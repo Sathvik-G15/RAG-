@@ -226,7 +226,7 @@ def evaluate(
         # Progress logging (every 5 queries or last query)
         elapsed = time.perf_counter() - t_start
         if (idx + 1) % 5 == 0 or idx == len(queries) - 1:
-            print(f"  [{method}] {format_progress(idx + 1, len(queries), elapsed)}")
+            print(f"  [{method}] {format_progress(idx + 1, len(queries), elapsed)}", flush=True)
 
         # Optional memory cleanup
         if gc_after_each:
@@ -400,7 +400,7 @@ def main():
     # Run evaluations
     all_results = {}
     for bench_name, queries in all_queries.items():
-        print(f"\n=== Evaluating on {bench_name.upper()} ({len(queries)} queries) ===")
+        print(f"\n=== Evaluating on {bench_name.upper()} ({len(queries)} queries) ===", flush=True)
         bench_results = {}
         for method in ("vanilla", "hybrid", "aeb"):
             report = evaluate(pipeline, queries, method=method, gc_after_each=args.gc_after_each)
@@ -413,7 +413,7 @@ def main():
                     report_path,
                 )
             except OSError as e:
-                print(f"⚠️  Could not save {report_path.name}: {e}")
+                print(f"⚠️  Could not save {report_path.name}: {e}", flush=True)
 
             # Cleanup between methods
             cleanup_after_step(f"{bench_name}-{method}")
@@ -428,8 +428,8 @@ def main():
             combined_path,
         )
     except OSError as e:
-        print(f"⚠️  Could not save combined results: {e}")
-        print(json.dumps(all_results, indent=2, default=str))
+        print(f"⚠️  Could not save combined results: {e}", flush=True)
+        print(json.dumps(all_results, indent=2, default=str), flush=True)
     
     # Run threshold sweep if requested
     if args.threshold_sweep:
@@ -437,11 +437,11 @@ def main():
         seed_queries = get_seed_queries()
         run_threshold_sweep(pipeline, seed_queries, args.thresholds, Path(args.output))
     
-    print("\n=== Summary ===")
+    print("\n=== Summary ===", flush=True)
     for bench_name, bench_results in all_results.items():
-        print(f"\n{bench_name.upper()}:")
+        print(f"\n{bench_name.upper()}:", flush=True)
         for method, report in bench_results.items():
-            print(f"  {method}: Acc={report.accuracy:.2f}, Abstain={report.abstention_rate:.2f}, Halluc={report.avg_hallucination:.2f}, AvgK={report.avg_retrieval_k:.1f}")
+            print(f"  {method}: Acc={report.accuracy:.2f}, Abstain={report.abstention_rate:.2f}, Halluc={report.avg_hallucination:.2f}, AvgK={report.avg_retrieval_k:.1f}", flush=True)
 
 if __name__ == "__main__":
     main()
