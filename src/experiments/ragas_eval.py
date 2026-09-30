@@ -1,4 +1,4 @@
-"""RAGAS automated evaluation harness for CAAR-CDSS with Kaggle & HF API judge support."""
+"""RAGAS automated evaluation harness for CAAR-CDSS with Kaggle GPU & HF judge support."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 # -----------------------------------------------------------------------------
-# Compatibility shim: some versions of ragas import ChatVertexAI from langchain_community
+# Compatibility shim (ragas/langchain variants)
 # -----------------------------------------------------------------------------
 try:
     import langchain_community.chat_models  # type: ignore
@@ -37,11 +37,8 @@ except Exception:
     pass
 
 
-# -----------------------------------------------------------------------------
-# Judges
-# -----------------------------------------------------------------------------
 def _get_langchain_hf_pipeline_wrapper():
-    """Prefer new langchain-huggingface wrapper if available; fallback to deprecated one."""
+    """Prefer newer langchain-huggingface wrapper if available; fallback to deprecated one."""
     try:
         from langchain_huggingface import HuggingFacePipeline  # type: ignore
         return HuggingFacePipeline
@@ -50,11 +47,11 @@ def _get_langchain_hf_pipeline_wrapper():
         return HuggingFacePipeline
 
 
+# -----------------------------------------------------------------------------
+# Judges
+# -----------------------------------------------------------------------------
 class KagglePipelineJudge:
-    """RAGAS judge that wraps a loaded HuggingFace transformers pipeline.
-
-    Reuses the already-loaded fp16 model - zero API calls.
-    """
+    """RAGAS judge that wraps a loaded HuggingFace transformers pipeline (local GPU)."""
 
     def __init__(self, pipe: Any):
         from ragas.llms import LangchainLLMWrapper
@@ -70,7 +67,7 @@ class KagglePipelineJudge:
 class HFAPIJudge:
     """RAGAS judge using Hugging Face Inference Providers via LangChain HuggingFaceEndpoint.
 
-    NOTE: provider/model availability depends on your HF Inference Providers setup (may require billing).
+    Note: Provider/model availability may require billing; many provider/model combos won’t work.
     """
 
     def __init__(self, model_name: str, hf_token: str | None = None, provider: str | None = "together"):
@@ -102,11 +99,7 @@ def get_ragas_judge(
     model_name: str = DEFAULT_JUDGE_MODEL,
     provider: str | None = "together",
 ):
-    """Get RAGAS judge wrapper.
-
-    - If pipe is provided, uses KagglePipelineJudge (local GPU, no API).
-    - Otherwise uses HFAPIJudge (HF Inference Providers).
-    """
+    """Return a RAGAS judge LLM wrapper."""
     if pipe is not None:
         logger.info("Using KagglePipelineJudge (local pipeline, 0 API calls).")
         return KagglePipelineJudge(pipe).llm
@@ -115,13 +108,13 @@ def get_ragas_judge(
 
 
 # -----------------------------------------------------------------------------
-# Embeddings (PATCHED: CPU by default)
+# Embeddings (FIX: CPU by default on Kaggle)
 # -----------------------------------------------------------------------------
 def get_ragas_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL, force_cpu: bool = True):
-    """Get Hugging Face embeddings wrapper for RAGAS.
+    """RAGAS embeddings wrapper.
 
-    Kaggle patch:
-      - Default to CPU embeddings to avoid VRAM contention/hangs on T4.
+    Kaggle stability fix:
+      - Default to CPU embeddings to avoid GPU contention / hangs on T4.
     """
     from langchain_community.embeddings import HuggingFaceEmbeddings
     from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -139,15 +132,14 @@ def get_ragas_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL, force_cpu: b
 
 
 # -----------------------------------------------------------------------------
-# Local judge model loader (PATCHED: no max_memory passed to pipeline())
+# Local judge model loader (FIX: do NOT pass max_memory to pipeline())
 # -----------------------------------------------------------------------------
 def load_local_judge_pipeline(model_id: str, max_new_tokens: int = 256):
     """Load local fp16 judge model safely.
 
     Critical fix:
-      - DO NOT pass max_memory into transformers.pipeline(), otherwise it can be forwarded
-        into generate() and crash with:
-          ValueError: model_kwargs not used by the model: ['max_memory']
+      - DO NOT pass max_memory into transformers.pipeline()
+        (it can be forwarded to generate() -> crash).
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, logging as hf_logging
@@ -161,18 +153,18 @@ def load_local_judge_pipeline(model_id: str, max_new_tokens: int = 256):
 
     max_memory = None
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        # This is safe when used in from_pretrained()
+        # Used ONLY in from_pretrained (safe).
         max_memory = {i: "15GiB" for i in range(torch.cuda.device_count())}
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.float16,
         device_map="auto",
-        max_memory=max_memory,       # OK here
+        max_memory=max_memory,  # OK here
         low_cpu_mem_usage=True,
     )
 
-    # IMPORTANT: do NOT pass max_memory/device_map to pipeline
+    # IMPORTANT: no max_memory/device_map passed here
     pipe = pipeline(
         "text-generation",
         model=model,
@@ -188,7 +180,7 @@ def load_local_judge_pipeline(model_id: str, max_new_tokens: int = 256):
 
 
 # -----------------------------------------------------------------------------
-# RAGAS run
+# RAGAS evaluation
 # -----------------------------------------------------------------------------
 def run_ragas_eval(
     queries: list[str],
@@ -203,19 +195,19 @@ def run_ragas_eval(
     max_workers: int = 2,
     timeout: int = 600,
 ) -> dict[str, float | None]:
-    """Run RAGAS evaluation and return mean metric scores (None if no valid values)."""
+    """Run RAGAS and return mean scores (None if all NaN)."""
     from datasets import Dataset
     from ragas import evaluate
     from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
     from ragas.run_config import RunConfig
 
-    payload: dict[str, Any] = {
-        "question": queries,
-        "answer": answers,
-        "contexts": contexts,
-    }
-    if ground_truths:
-        payload["ground_truth"] = ground_truths
+    payload: dict[str, Any] = {"question": queries, "answer": answers, "contexts": contexts}
+
+    gt_present = False
+    if ground_truths is not None:
+        gt_present = any((gt or "").strip() for gt in ground_truths)
+        if gt_present:
+            payload["ground_truth"] = ground_truths
 
     dataset = Dataset.from_dict(payload)
 
@@ -223,7 +215,7 @@ def run_ragas_eval(
     judge_embeddings = get_ragas_embeddings(model_name=embedding_model, force_cpu=True)
 
     metrics = [faithfulness, answer_relevancy]
-    if ground_truths:
+    if gt_present:
         metrics.extend([context_precision, context_recall])
 
     run_config = RunConfig(
@@ -250,7 +242,6 @@ def run_ragas_eval(
         show_progress=True,
     )
 
-    # Aggregate means safely
     out: dict[str, float | None] = {}
     if hasattr(results, "to_pandas"):
         df = results.to_pandas()
@@ -270,14 +261,13 @@ def run_ragas_eval(
             except Exception:
                 pass
 
-    # If everything None, keep going but return structured output (don’t hard-crash)
     if not out or all(v is None for v in out.values()):
         logger.error("RAGAS produced no valid metrics (all NaN/None). Returning None metrics.")
         return {
             "faithfulness": None,
             "answer_relevancy": None,
-            "context_precision": None if ground_truths else None,
-            "context_recall": None if ground_truths else None,
+            "context_precision": None if gt_present else None,
+            "context_recall": None if gt_present else None,
         }
 
     return out
@@ -308,7 +298,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logger.info("Evaluating %d samples on %s benchmark (mode=%s)...", args.n, args.benchmark, args.mode)
 
-    # Load benchmark data
+    # Load benchmark items
     queries_data: list[dict[str, Any]] = []
     try:
         if args.benchmark == "seeds":
@@ -320,11 +310,12 @@ def main():
     except Exception as err:
         logger.warning("Could not load benchmark %s (%s). Using fallback queries.", args.benchmark, err)
 
-    # Generate responses with CDSS pipeline
+    # Generate answers/contexts
     if queries_data:
         from ..confidence.pipeline import Pipeline
-        from ..utils.disk_utils import cleanup_after_step, format_progress
+        from ..utils.disk_utils import cleanup_after_step, format_progress, cleanup_gpu_memory
 
+        # Only load local real models for local modes
         prefer_real = args.mode in ("kaggle_fp16", "local_4bit")
         pipeline_obj = Pipeline.from_seed(prefer_real=prefer_real)
 
@@ -355,6 +346,9 @@ def main():
             if args.gc_after_each:
                 cleanup_after_step(f"query-{idx+1}")
 
+        # Free memory before loading judge model (important on T4)
+        del pipeline_obj
+        cleanup_gpu_memory(log_prefix="[After answer generation]")
     else:
         sample_queries = ["What is the first-line treatment for community acquired pneumonia?"] * args.n
         sample_answers = ["Amoxicillin is first-line for uncomplicated outpatient CAP."] * args.n
@@ -398,7 +392,7 @@ def main():
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
-    # Output path resolution
+    # Save
     out_path = Path(args.output)
     if out_path.is_dir() or not out_path.suffix:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -406,7 +400,6 @@ def main():
     else:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save (uses your repo’s safe_save)
     from ..utils.disk_utils import safe_save
     safe_save(json.dumps(res, indent=2, default=str), out_path)
 
