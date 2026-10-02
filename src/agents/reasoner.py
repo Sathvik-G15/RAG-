@@ -1,10 +1,7 @@
 """LLM reasoning agent with template-based deterministic mock fallback.
 
 The mock reasoner is invoked when no real LLM is available; it enables
-end-to-end end-to-end testing of the AEB pipeline (confidence, escalation,
-verification) without GPU/network access. The mock is intentionally designed
-to produce differential diagnoses tied to keywords observed in retrieved chunks,
-giving the verification layer something meaningful to score.
+end-to-end testing of the AEB pipeline without GPU/network access.
 """
 
 from __future__ import annotations
@@ -49,15 +46,11 @@ class MockReasoner(BaseReasoner):
         query_l = query.lower()
         scored: list[DifferentialDiagnosis] = []
 
-        # Co-occurrence disambiguation: fever + flank pain points to pyelonephritis
-        # rather than simple cystitis, even though "dysuria" is shared.
         pyelo_boost = 1.0
         if "pyelonephritis" in query_l or ("flank pain" in query_l and ("fever" in query_l or "chills" in query_l)):
             pyelo_boost = 1.7
 
         for pattern, dx, prior in _DX_PATTERNS:
-            # Word-boundary anchors prevent partial-word matches (e.g. "flu"
-            # must not match "fluoroquinolone").
             pat = re.compile(r"(?<![a-z0-9])(" + pattern + r")(?![a-z0-9])")
 
             matching: list[EvidenceChunk] = []
@@ -69,7 +62,6 @@ class MockReasoner(BaseReasoner):
             if not matching:
                 continue
 
-            # Evidence support weighted by retrieval relevance (similarity score).
             relevance = sum(max(0.0, ch.similarity_score) for ch in matching) / max(len(matching), 1)
             coverage = len(matching) / max(len(evidence), 1)
             evidence_support = 0.7 * coverage + 0.3 * relevance
@@ -77,13 +69,8 @@ class MockReasoner(BaseReasoner):
             query_hit = pat.search(query_l) is not None
 
             if query_hit:
-                # Query text directly signals this diagnosis; evidence confirms it.
-                # Credit exclusive (non-shared) pattern terms more than shared ones:
-                # e.g. "flank pain" points to pyelonephritis; "dysuria" is shared with UTI.
                 alternatives = [a.strip() for a in pattern.split("|") if a.strip()]
                 matched_alts = [a for a in alternatives if a in query_l]
-                # Negation handling: exclude alternatives explicitly negated in the
-                # query (e.g. "without flank pain" should not trigger pyelonephritis).
                 negated = re.compile(r"\b(?:without|no|denies|denies any|negative for)\b")
                 negated_alts = [
                     a for a in matched_alts
@@ -92,6 +79,7 @@ class MockReasoner(BaseReasoner):
                 matched_alts = [a for a in matched_alts if a not in negated_alts]
                 if not matched_alts:
                     continue
+
                 shared: set[str] = set()
                 for other_pat, _, _ in _DX_PATTERNS:
                     if other_pat == pattern:
@@ -100,13 +88,13 @@ class MockReasoner(BaseReasoner):
                         oa = oa.strip()
                         if oa and oa in query_l:
                             shared.add(oa)
+
                 exclusive = [a for a in matched_alts if a not in shared]
                 hits = len(matched_alts)
                 specificity = 0.5 + 0.5 * min(1.5, hits * 0.4 + len(exclusive))
                 boost = pyelo_boost if dx == "pyelonephritis" else 1.0
                 raw = prior * specificity * (0.55 + 0.45 * evidence_support) * boost
             else:
-                # Evidence-only hypothesis: needs substantial corroboration to rank.
                 if evidence_support < 0.35:
                     continue
                 raw = prior * 0.35 * evidence_support
@@ -127,8 +115,6 @@ class MockReasoner(BaseReasoner):
                     probability=round(float(raw), 4),
                     supporting_evidence=support[:3],
                     sources=sources_used,
-                    # Carry the query-signal flag for confidence computation below.
-                    # We use a private marker key since the model is generic.
                 )
             )
             scored[-1].query_signal = query_hit
@@ -152,11 +138,6 @@ class MockReasoner(BaseReasoner):
             d.probability = round(d.probability / total, 4)
 
         top = scored[0]
-
-        # Safety: if the leading hypothesis was never signaled by the query text
-        # itself (only inferred from loose evidence patterns), we do NOT have a
-        # confident diagnosis. An out-of-scope query must escalate rather than
-        # receive a confidently wrong single-diagnosis answer.
         if not getattr(top, "query_signal", False):
             candidates = ", ".join(d.diagnosis for d in scored[:3])
             return ClinicalResponse(
@@ -166,36 +147,28 @@ class MockReasoner(BaseReasoner):
                 uncertainty=1.0,
                 reasoning=(
                     "Insufficient evidence to determine a confident differential diagnosis. "
-                    f"Possible conditions considered: {candidates}. "
-                    "Clinician review is advised."
+                    f"Possible conditions considered: {candidates}. Clinician review is advised."
                 ),
                 decision=TriageDecision.ESCALATE,
                 escalated_reason="No query-anchored diagnosis identified; evidence does not support a confident recommendation.",
             )
 
         second = scored[1] if len(scored) > 1 else None
-
-        # Confidence: agreement between top-1 and runner-up plus evidence richness.
         margin = (top.probability - (second.probability if second else 0.0)) if second else top.probability
         evidence_richness = min(1.0, len(top.supporting_evidence) / 3.0)
         confidence = round(float(min(1.0, 0.5 + margin * 0.6 + evidence_richness * 0.15)), 4)
 
-        # Reasoning cites evidence verbatim so the verification layer can score it.
         quote = ""
         if top.supporting_evidence:
             snippet = top.supporting_evidence[0].split("]", 1)[-1].strip().replace("\n", " ")
             snippet = re.split(r"(?<=[.!?])\s+", snippet)[0]
             quote = snippet[:220]
 
-        reasoning_lines = [
-            f"The patient presentation is most consistent with {top.diagnosis}.",
-        ]
+        reasoning_lines = [f"The patient presentation is most consistent with {top.diagnosis}."]
         if quote:
             reasoning_lines.append(f"Supporting evidence: {quote}")
         if second:
-            reasoning_lines.append(
-                f"An alternative differential diagnosis is {second.diagnosis}."
-            )
+            reasoning_lines.append(f"An alternative differential diagnosis is {second.diagnosis}.")
 
         return ClinicalResponse(
             primary_diagnosis=top.diagnosis,
@@ -207,14 +180,12 @@ class MockReasoner(BaseReasoner):
 
 
 def _parse_llm_json(text: str) -> dict:
-    """Robust 3-tier JSON parser for 8B and smaller open-source LLMs."""
-    # Attempt 1: direct parse
+    """Robust 3-tier JSON parser for open-source LLM outputs."""
     try:
         return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
 
-    # Attempt 2: balanced curly brace regex extraction
     match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
     if match:
         try:
@@ -222,7 +193,6 @@ def _parse_llm_json(text: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # Attempt 3: fallback field-by-field regex extraction
     diag_match = re.search(r'"primary_diagnosis"\s*:\s*"([^"]+)"', text)
     conf_match = re.search(r'"confidence"\s*:\s*([0-9.]+)', text)
     diag = diag_match.group(1) if diag_match else None
@@ -244,8 +214,35 @@ def _parse_llm_json(text: str) -> dict:
     }
 
 
+def _strip_bad_pipe_kwargs(pipe) -> None:
+    """Ensure max_memory never gets forwarded into generate()."""
+    targets = [pipe]
+    if hasattr(pipe, "model"):
+        targets.append(pipe.model)
+
+    for target in targets:
+        gen_cfg = getattr(target, "generation_config", None)
+        if gen_cfg is not None:
+            if hasattr(gen_cfg, "max_memory"):
+                delattr(gen_cfg, "max_memory")
+            if hasattr(gen_cfg, "_extra_kwargs") and isinstance(gen_cfg._extra_kwargs, dict):
+                gen_cfg._extra_kwargs.pop("max_memory", None)
+
+        cfg = getattr(target, "config", None)
+        if cfg is not None:
+            if hasattr(cfg, "max_memory"):
+                delattr(cfg, "max_memory")
+            if hasattr(cfg, "_extra_kwargs") and isinstance(cfg._extra_kwargs, dict):
+                cfg._extra_kwargs.pop("max_memory", None)
+
+        for attr in ("model_kwargs", "_forward_params", "_preprocess_params", "_postprocess_params", "_extra_kwargs"):
+            d = getattr(target, attr, None)
+            if isinstance(d, dict):
+                d.pop("max_memory", None)
+
+
 class OpenSourceLLMReasoner(BaseReasoner):
-    """Real LLM reasoner with 4-bit quantization (local) or fp16 (Kaggle T4)."""
+    """Real LLM reasoner with 4-bit quantization (local) or fp16 (Kaggle)."""
 
     def __init__(
         self,
@@ -264,7 +261,11 @@ class OpenSourceLLMReasoner(BaseReasoner):
 
     def _load(self) -> None:
         import torch
-        from transformers import BitsAndBytesConfig, pipeline
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
+
+        tok = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
+        if tok.pad_token_id is None and tok.eos_token_id is not None:
+            tok.pad_token_id = tok.eos_token_id
 
         if self.load_in_4bit and torch.cuda.is_available():
             quant_config = BitsAndBytesConfig(
@@ -273,30 +274,45 @@ class OpenSourceLLMReasoner(BaseReasoner):
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
             )
-            self._pipe = pipeline(
-                "text-generation",
-                model=self.model_name,
-                model_kwargs={"quantization_config": quant_config},
+            model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
                 device_map="auto",
-                max_new_tokens=self.max_new_tokens,
+                quantization_config=quant_config,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+                low_cpu_mem_usage=True,
             )
-        else:
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            pipe_kwargs = {
-                "torch_dtype": dtype,
-                "device_map": "auto" if torch.cuda.is_available() else None,
-                "max_new_tokens": self.max_new_tokens,
-            }
-            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-                # GPU 0 gets 9 GiB for Llama's large embedding/early layers.
-                # GPU 1 is capped at 7 GiB so DeBERTa-v3-large (~1.8 GiB fp16)
-                # can load onto cuda:1 without OOM.
-                pipe_kwargs["max_memory"] = {0: "9GiB", 1: "7GiB"}
             self._pipe = pipeline(
                 "text-generation",
-                model=self.model_name,
-                **pipe_kwargs,
+                model=model,
+                tokenizer=tok,
+                return_full_text=False,
             )
+            _strip_bad_pipe_kwargs(self._pipe)
+            return
+
+        # fp16/cpu path (FIX: max_memory goes to from_pretrained, NOT pipeline)
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        device_map = "auto" if torch.cuda.is_available() else None
+
+        max_memory = None
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            # your original intent preserved:
+            max_memory = {0: "9GiB", 1: "7GiB"}
+
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            torch_dtype=dtype,
+            device_map=device_map,
+            max_memory=max_memory,          # OK HERE
+            low_cpu_mem_usage=True,
+        )
+        self._pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tok,
+            return_full_text=False,
+        )
+        _strip_bad_pipe_kwargs(self._pipe)
 
     def generate(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
         if self._pipe is None:
@@ -314,6 +330,7 @@ class OpenSourceLLMReasoner(BaseReasoner):
             "differential (list of objects with diagnosis, probability, supporting_evidence, sources), reasoning (string)."
         )
 
+        # Note: don't pass generation_config explicitly; just pass generation args.
         outputs = self._pipe(
             prompt,
             max_new_tokens=self.max_new_tokens,
@@ -337,8 +354,6 @@ class HFInferenceReasoner(BaseReasoner):
         max_new_tokens: int = 256,
         temperature: float = 0.1,
     ):
-        import os
-
         from huggingface_hub import InferenceClient
 
         self.model_name = model_name
@@ -379,10 +394,7 @@ def make_reasoner(
     model_name: str | None = None,
     hf_token: str | None = None,
 ) -> BaseReasoner:
-    """Factory that creates Mock, OpenSource (4-bit/fp16), or HF API reasoner.
-
-    If backend is explicitly set to a real backend (not "mock"), failures will raise.
-    """
+    """Factory: Mock, OpenSource (4-bit/fp16), or HF API reasoner."""
     if backend == "mock":
         return MockReasoner()
 
@@ -397,4 +409,3 @@ def make_reasoner(
         )
 
     raise ValueError(f"Unknown backend: {backend}")
-

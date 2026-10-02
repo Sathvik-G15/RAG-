@@ -147,6 +147,19 @@ def load_local_judge_pipeline(model_id: str, max_new_tokens: int = 256):
     )
     if getattr(pipe, "tokenizer", None) is not None and pipe.tokenizer.pad_token_id is None:
         pipe.tokenizer.pad_token_id = pipe.tokenizer.eos_token_id
+
+    for target in (pipe, model):
+        gen_cfg = getattr(target, "generation_config", None)
+        if gen_cfg is not None:
+            if hasattr(gen_cfg, "max_memory"):
+                delattr(gen_cfg, "max_memory")
+            if hasattr(gen_cfg, "_extra_kwargs") and isinstance(gen_cfg._extra_kwargs, dict):
+                gen_cfg._extra_kwargs.pop("max_memory", None)
+        for attr in ("model_kwargs", "_forward_params", "_preprocess_params", "_postprocess_params", "_extra_kwargs"):
+            d = getattr(target, attr, None)
+            if isinstance(d, dict):
+                d.pop("max_memory", None)
+
     return pipe
 
 
