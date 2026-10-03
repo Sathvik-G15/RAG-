@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path

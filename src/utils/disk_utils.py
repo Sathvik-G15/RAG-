@@ -143,7 +143,18 @@ def cleanup_hf_cache(
 # ---------------------------------------------------------------------------
 
 def cleanup_gpu_memory(log_prefix: str = "") -> None:
-    """Run garbage collection and clear CUDA cache (if available)."""
+    """Terminate background child processes, run garbage collection, and clear CUDA cache."""
+    try:
+        import multiprocessing
+        for p in multiprocessing.active_children():
+            try:
+                p.terminate()
+                p.join(timeout=0.5)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     gc.collect()
 
     try:

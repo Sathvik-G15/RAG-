@@ -12,6 +12,8 @@ import types
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_JUDGE_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
@@ -115,16 +117,26 @@ def get_ragas_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL, force_cpu: b
 
 
 def load_local_judge_pipeline(model_id: str, load_in_4bit: bool = True, max_new_tokens: int = 512):
-    """Local 4-bit / fp16 judge model. Does NOT pass max_memory into pipeline()."""
+    """Local 4-bit / fp16 judge model with safe VRAM headroom allocation."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, logging as hf_logging
+    from ..utils.disk_utils import cleanup_gpu_memory
 
+    cleanup_gpu_memory("[Pre-Judge-Load]")
     hf_logging.set_verbosity_error()
     logger.info("Loading local judge model: %s (load_in_4bit=%s)", model_id, load_in_4bit)
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    max_memory = None
+    if torch.cuda.is_available():
+        n_gpus = torch.cuda.device_count()
+        # Cap GPU memory per device to leave buffer for tensor conversion & embeddings
+        vram_per_gpu = "11GiB" if load_in_4bit else "13GiB"
+        max_memory = {i: vram_per_gpu for i in range(n_gpus)}
+        max_memory["cpu"] = "24GiB"
 
     if load_in_4bit and torch.cuda.is_available():
         from transformers import BitsAndBytesConfig
@@ -138,13 +150,10 @@ def load_local_judge_pipeline(model_id: str, load_in_4bit: bool = True, max_new_
             model_id,
             quantization_config=bnb_config,
             device_map="auto",
+            max_memory=max_memory,
             low_cpu_mem_usage=True,
         )
     else:
-        max_memory = None
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            max_memory = {i: "15GiB" for i in range(torch.cuda.device_count())}
-
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
