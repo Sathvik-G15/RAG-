@@ -114,29 +114,44 @@ def get_ragas_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL, force_cpu: b
     return LangchainEmbeddingsWrapper(hf_emb)
 
 
-def load_local_judge_pipeline(model_id: str, max_new_tokens: int = 256):
-    """Local fp16 judge model. Does NOT pass max_memory into pipeline()."""
+def load_local_judge_pipeline(model_id: str, load_in_4bit: bool = True, max_new_tokens: int = 512):
+    """Local 4-bit / fp16 judge model. Does NOT pass max_memory into pipeline()."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, logging as hf_logging
 
     hf_logging.set_verbosity_error()
-    logger.info("Loading local judge model: %s", model_id)
+    logger.info("Loading local judge model: %s (load_in_4bit=%s)", model_id, load_in_4bit)
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    max_memory = None
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        max_memory = {i: "15GiB" for i in range(torch.cuda.device_count())}
+    if load_in_4bit and torch.cuda.is_available():
+        from transformers import BitsAndBytesConfig
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            quantization_config=bnb_config,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+    else:
+        max_memory = None
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            max_memory = {i: "15GiB" for i in range(torch.cuda.device_count())}
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16,
-        device_map="auto",
-        max_memory=max_memory,  # OK here
-        low_cpu_mem_usage=True,
-    )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else None,
+            max_memory=max_memory,
+            low_cpu_mem_usage=True,
+        )
 
     pipe = pipeline(
         "text-generation",
@@ -257,7 +272,7 @@ def main():
     args = parser.parse_args()
 
     if args.mode in ("both", "real"):
-        args.mode = "kaggle_fp16"
+        args.mode = "local_4bit"
 
     logging.basicConfig(level=logging.INFO)
     logger.info("Evaluating %d samples on %s benchmark (mode=%s)...", args.n, args.benchmark, args.mode)
@@ -313,8 +328,9 @@ def main():
         sample_ground_truths = ["amoxicillin"] * args.n
 
     # Evaluate
-    if args.mode == "kaggle_fp16":
-        pipe = load_local_judge_pipeline(args.judge_model, max_new_tokens=256)
+    if args.mode in ("kaggle_fp16", "local_4bit"):
+        load_in_4bit = (args.mode == "local_4bit")
+        pipe = load_local_judge_pipeline(args.judge_model, load_in_4bit=load_in_4bit, max_new_tokens=512)
         res = run_ragas_eval(
             queries=sample_queries,
             answers=sample_answers,
@@ -345,7 +361,7 @@ def main():
             timeout=args.timeout,
         )
     else:
-        raise RuntimeError("Use --mode kaggle_fp16 or hf_api (mock not supported).")
+        raise RuntimeError(f"Unsupported mode: {args.mode}. Use --mode local_4bit, kaggle_fp16, or hf_api.")
 
     out_path = Path(args.output)
     if out_path.is_dir() or not out_path.suffix:

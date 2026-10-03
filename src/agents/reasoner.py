@@ -395,14 +395,23 @@ def make_reasoner(
     hf_token: str | None = None,
 ) -> BaseReasoner:
     """Factory: Mock, OpenSource (4-bit/fp16), or HF API reasoner."""
+    if prefer_real:
+        if backend in ("hf_inference_api", "hf_api"):
+            return HFInferenceReasoner(model_name=model_name or "microsoft/Llama3-Med-8B-Instruct", hf_token=hf_token)
+        load_in_4bit = (backend != "kaggle_fp16")
+        return OpenSourceLLMReasoner(
+            model_name=model_name or "microsoft/Llama3-Med-8B-Instruct",
+            load_in_4bit=load_in_4bit,
+        )
+
     if backend == "mock":
         return MockReasoner()
 
-    if backend == "hf_inference_api" or (prefer_real and backend == "hf_api"):
+    if backend in ("hf_inference_api", "hf_api"):
         return HFInferenceReasoner(model_name=model_name or "microsoft/Llama3-Med-8B-Instruct", hf_token=hf_token)
 
-    if backend in ["local_4bit", "kaggle_fp16", "real"] or (prefer_real and model_name):
-        load_in_4bit = backend == "local_4bit" or (backend == "real" and prefer_real)
+    if backend in ["local_4bit", "kaggle_fp16", "real"]:
+        load_in_4bit = (backend != "kaggle_fp16")
         return OpenSourceLLMReasoner(
             model_name=model_name or "microsoft/Llama3-Med-8B-Instruct",
             load_in_4bit=load_in_4bit,
