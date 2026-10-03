@@ -263,6 +263,7 @@ def main():
     parser.add_argument("--mode", type=str, default="mock",
                         choices=["mock", "kaggle_fp16", "hf_api", "both", "real", "local_4bit"])
     parser.add_argument("--output", "--output-dir", dest="output", type=str, default="experiments/results/ragas_results.json")
+    parser.add_argument("--chroma-dir", type=str, default=None, help="Path to pre-ingested ChromaDB directory")
     parser.add_argument("--judge-model", type=str, default=DEFAULT_JUDGE_MODEL)
     parser.add_argument("--embedding-model", type=str, default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--provider", type=str, default="together")
@@ -295,7 +296,12 @@ def main():
         from ..utils.disk_utils import cleanup_after_step, format_progress, cleanup_gpu_memory
 
         prefer_real = args.mode in ("kaggle_fp16", "local_4bit")
-        pipeline_obj = Pipeline.from_seed(prefer_real=prefer_real)
+        if args.chroma_dir and Path(args.chroma_dir).exists():
+            logger.info("Loading Pipeline from ChromaDB: %s", args.chroma_dir)
+            pipeline_obj = Pipeline.from_corpus(chroma_dir=args.chroma_dir, prefer_real=prefer_real)
+        else:
+            logger.info("Loading Pipeline from Seed Corpus.")
+            pipeline_obj = Pipeline.from_seed(prefer_real=prefer_real)
 
         sample_queries, sample_answers, sample_contexts, sample_ground_truths = [], [], [], []
 
