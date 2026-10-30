@@ -1,6 +1,8 @@
 import { Component, ErrorInfo, ReactNode } from 'react';
 import { Button, Card } from '../ui';
 
+const isDev = import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEVTOOLS === 'true';
+
 interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
@@ -74,7 +76,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             <p className="mt-2 text-medical-neutral-600 dark:text-medical-neutral-400">
               We apologize for the inconvenience. Please try again or contact support if the problem persists.
             </p>
-            {this.state.error && (
+            {isDev && this.state.error && (
               <details className="mt-4 text-left">
                 <summary className="cursor-pointer text-sm text-medical-neutral-500 dark:text-medical-neutral-400">
                   Error details

@@ -16,12 +16,24 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# Fallback default if config not available
+DEFAULT_JUDGE_MODEL = "microsoft/Llama3-Med-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
+
+
 # -----------------------------------------------------------------------------
-# Compatibility shim: some ragas/langchain combos import ChatVertexAI
+# Compatibility shim: some ragas/langchain combos import ChatVertexAI / ContextOverflowError
 # -----------------------------------------------------------------------------
+try:
+    import langchain_core.exceptions  # type: ignore
+    if not hasattr(langchain_core.exceptions, "ContextOverflowError"):
+        class ContextOverflowError(Exception):
+            pass
+        langchain_core.exceptions.ContextOverflowError = ContextOverflowError
+except Exception:
+    pass
+
 try:
     import langchain_community.chat_models  # type: ignore
     if "langchain_community.chat_models.vertexai" not in sys.modules:
@@ -32,7 +44,7 @@ try:
 
         v_mod.ChatVertexAI = ChatVertexAI
         sys.modules["langchain_community.chat_models.vertexai"] = v_mod
-        setattr(langchain_community.chat_models, "vertexai", v_mod)
+        langchain_community.chat_models.vertexai = v_mod
 except Exception:
     pass
 
@@ -89,9 +101,12 @@ class HFAPIJudge:
 def get_ragas_judge(
     pipe: Any = None,
     hf_token: str | None = None,
-    model_name: str = DEFAULT_JUDGE_MODEL,
+    model_name: str | None = None,
     provider: str | None = "together",
 ):
+    if model_name is None:
+        from ..config import get_app_config
+        model_name = get_app_config().ragas_judge.model_name
     if pipe is not None:
         logger.info("Using KagglePipelineJudge (local pipeline, 0 API calls).")
         return KagglePipelineJudge(pipe).llm
@@ -101,9 +116,9 @@ def get_ragas_judge(
 
 def get_ragas_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL, force_cpu: bool = True):
     """CPU-by-default on Kaggle to avoid VRAM contention/hangs."""
+    import torch
     from langchain_community.embeddings import HuggingFaceEmbeddings
     from ragas.embeddings import LangchainEmbeddingsWrapper
-    import torch
 
     device = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Initializing RAGAS embeddings: %s on %s (force_cpu=%s)", model_name, device, force_cpu)
@@ -119,7 +134,9 @@ def get_ragas_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL, force_cpu: b
 def load_local_judge_pipeline(model_id: str, load_in_4bit: bool = True, max_new_tokens: int = 512):
     """Local 4-bit / fp16 judge model with safe VRAM headroom allocation."""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, logging as hf_logging
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+    from transformers import logging as hf_logging
+
     from ..utils.disk_utils import cleanup_gpu_memory
 
     cleanup_gpu_memory("[Pre-Judge-Load]")
@@ -133,10 +150,13 @@ def load_local_judge_pipeline(model_id: str, load_in_4bit: bool = True, max_new_
     max_memory = None
     if torch.cuda.is_available():
         n_gpus = torch.cuda.device_count()
-        # Cap GPU memory per device to leave buffer for tensor conversion & embeddings
-        vram_per_gpu = "11GiB" if load_in_4bit else "13GiB"
+        # RTX 4050 6 GB: cap at 5 GiB in 4-bit (leaves ~1 GB for CUDA/OS overhead),
+        # 4 GiB in fp16 (larger activations need more headroom).
+        # Remainder offloaded to CPU; 18 GiB keeps ~6 GB free for the OS + embeddings
+        # on a 24 GB RAM machine.
+        vram_per_gpu = "5GiB" if load_in_4bit else "4GiB"
         max_memory = {i: vram_per_gpu for i in range(n_gpus)}
-        max_memory["cpu"] = "24GiB"
+        max_memory["cpu"] = "18GiB"
 
     if load_in_4bit and torch.cuda.is_available():
         from transformers import BitsAndBytesConfig
@@ -156,7 +176,7 @@ def load_local_judge_pipeline(model_id: str, load_in_4bit: bool = True, max_new_
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto" if torch.cuda.is_available() else None,
             max_memory=max_memory,
             low_cpu_mem_usage=True,
@@ -194,7 +214,6 @@ def run_ragas_eval(
     ground_truths: list[str] | None = None,
     pipe: Any = None,
     hf_token: str | None = None,
-    judge_model: str = DEFAULT_JUDGE_MODEL,
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     provider: str | None = "together",
     max_workers: int = 2,
@@ -215,7 +234,7 @@ def run_ragas_eval(
 
     dataset = Dataset.from_dict(payload)
 
-    judge_llm = get_ragas_judge(pipe=pipe, hf_token=hf_token, model_name=judge_model, provider=provider)
+    judge_llm = get_ragas_judge(pipe=pipe, hf_token=hf_token, provider=provider)
     judge_embeddings = get_ragas_embeddings(model_name=embedding_model, force_cpu=True)
 
     metrics = [faithfulness, answer_relevancy]
@@ -302,7 +321,7 @@ def main():
     # Generate answers/contexts with CDSS
     if queries_data:
         from ..confidence.pipeline import Pipeline
-        from ..utils.disk_utils import cleanup_after_step, format_progress, cleanup_gpu_memory
+        from ..utils.disk_utils import cleanup_after_step, cleanup_gpu_memory, format_progress
 
         prefer_real = args.mode in ("kaggle_fp16", "local_4bit")
         if args.chroma_dir and Path(args.chroma_dir).exists():
@@ -352,7 +371,6 @@ def main():
             contexts=sample_contexts,
             ground_truths=sample_ground_truths if any(sample_ground_truths) else None,
             pipe=pipe,
-            judge_model=args.judge_model,
             embedding_model=args.embedding_model,
             max_workers=1,
             timeout=1800,
@@ -369,7 +387,6 @@ def main():
             contexts=sample_contexts,
             ground_truths=sample_ground_truths if any(sample_ground_truths) else None,
             hf_token=hf_token,
-            judge_model=args.judge_model,
             embedding_model=args.embedding_model,
             provider=args.provider,
             max_workers=args.max_workers,

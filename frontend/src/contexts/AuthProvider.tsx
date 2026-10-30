@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { getAuthToken, setAuthToken, clearAuthToken, getAuthMode, type AuthMode } from '../lib/auth';
+import { getAuthToken, setAuthToken, clearAuthToken, getAuthMode, parseJwt, type AuthMode } from '../lib/auth';
 import { api } from '../lib';
 
 interface AuthContextType {
@@ -24,11 +24,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const token = await getAuthToken();
       if (token) {
         setIsAuthenticated(true);
+        const payload = parseJwt(token);
+        if (payload?.sub) {
+          setUser({ username: payload.sub });
+        }
       } else {
         setIsAuthenticated(false);
+        setUser(null);
       }
     } catch {
       setIsAuthenticated(false);
+      setUser(null);
     } finally {
       setIsLoading(false);
     }
@@ -39,7 +45,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (username: string, password: string) => {
-    const response = await api.post<{ access_token: string }>('/login', { username, password });
+    const response = await api.post<{ access_token: string }>(
+      '/login',
+      { username, password },
+      { skipAuth: true }
+    );
     setAuthToken(response.access_token);
     setIsAuthenticated(true);
     setUser({ username });

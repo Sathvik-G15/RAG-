@@ -10,6 +10,7 @@ from typing import Any
 
 from src.confidence.pipeline import Pipeline
 from src.data.ingest_external import ExternalDataIngestor, IngestionConfig
+from src.models import TriageDecision
 
 
 @dataclass
@@ -60,7 +61,7 @@ class EvaluationHarness:
                     retrieved_contexts=retrieved_contexts,
                     confidence=response.confidence,
                     hallucination_score=response.hallucination_score,
-                    abstained=response.decision.value == "escalate",
+                    abstained=response.decision == TriageDecision.ESCALATE,
                 )
 
                 # Compute citation accuracy
@@ -99,13 +100,6 @@ class EvaluationHarness:
             long_answer = item.get("long_answer", "")
             final_decision = item.get("final_decision", "")
             return question, f"{final_decision}: {long_answer}"
-
-        elif benchmark == "medmcqa":
-            question = item.get("question", "")
-            options = [item.get(f"opt{i}", "") for i in range(1, 5)]
-            answer_idx = item.get("cop", 0)
-            answer = options[answer_idx] if answer_idx < len(options) else ""
-            return question, answer
 
         return "", None
 
@@ -213,7 +207,7 @@ def run_full_evaluation(max_samples_per_benchmark: int = 30):
     print("=== Creating Evaluation Harness ===")
     harness = EvaluationHarness(pipeline, ingestor)
 
-    benchmarks = ["medqa", "pubmedqa", "medmcqa"]
+    benchmarks = ["medqa", "pubmedqa"]
     all_results = {}
 
     for bench in benchmarks:

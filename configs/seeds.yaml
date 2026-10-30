@@ -13,7 +13,7 @@ aeb:
   initial_k: 3
   step_k: 3
   max_k: 15
-  confidence_threshold: 0.80
+  confidence_threshold: 0.70
   stop_on_budget_exhausted: true
 
 retrieval:
@@ -32,15 +32,23 @@ calibration:
   default_temperature: 1.0
 
 llm:
-  model_name: "meta-llama/Llama-3.1-8B-Instruct"
-  serving_backend: "kaggle_fp16"
-  load_in_4bit: false
-  bnb_double_quant: false
-  max_new_tokens: 512
+  # microsoft/Llama3-Med-8B-Instruct: medical-tuned, fits 6GB at 4-bit NF4
+  model_name: "microsoft/Llama3-Med-8B-Instruct"
+  serving_backend: "local_4bit"
+  load_in_4bit: true
+  bnb_double_quant: true
+  max_new_tokens: 256
   temperature: 0.1
   top_p: 0.95
 
+ragas_judge:
+  # Use same model family for RAGAS judging
+  model_name: "microsoft/Llama3-Med-8B-Instruct"
+
+
 embedding:
-  model_name: "BAAI/bge-m3"
+  # bge-small-en-v1.5: 90 MB, 384-dim, runs fast on CPU — keeps VRAM free for
+  # the LLM. Swap to BAAI/bge-m3 only if you need multilingual / long-context.
+  model_name: "BAAI/bge-small-en-v1.5"
   chunk_size: 512
   chunk_overlap: 100

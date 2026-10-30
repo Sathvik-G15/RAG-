@@ -41,9 +41,11 @@ KAGGLE_SAFE_DEFAULTS = {
     "skip_threshold_sweep": True,  # Skip by default; run separately if time allows
     "skip_embedding_ablation": True,
     "hf_cache_keep_models": [      # Models to keep when cleaning HF cache
-        "meta-llama/Llama-3.1-8B-Instruct",
+        "Qwen/Qwen2.5-1.5B-Instruct",
         "BAAI/bge-small-en-v1.5",
+        "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
     ],
+
 }
 
 
@@ -74,6 +76,7 @@ class VerificationConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
+    model_config = {"protected_namespaces": ()}
     model_name: str = "microsoft/Llama3-Med-8B-Instruct"
     serving_backend: str = "local_4bit"
     load_in_4bit: bool = True
@@ -83,8 +86,14 @@ class LLMConfig(BaseModel):
     top_p: float = 0.95
 
 
+class RagasJudgeConfig(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    model_name: str = "microsoft/Llama3-Med-8B-Instruct"
+
+
 class EmbeddingConfig(BaseModel):
-    model_name: str = "BAAI/bge-m3"
+    model_config = {"protected_namespaces": ()}
+    model_name: str = "BAAI/bge-small-en-v1.5"
     chunk_size: int = 512
     chunk_overlap: int = 100
 
@@ -94,6 +103,7 @@ class AppConfig(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    ragas_judge: RagasJudgeConfig = Field(default_factory=RagasJudgeConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
 
 
@@ -122,6 +132,7 @@ def get_app_config() -> AppConfig:
         retrieval=RetrievalConfig(**seeds.get("retrieval", {})),
         verification=VerificationConfig(**seeds.get("verification", {})),
         llm=LLMConfig(**seeds.get("llm", {})),
+        ragas_judge=RagasJudgeConfig(**seeds.get("ragas_judge", {})),
         embedding=EmbeddingConfig(**seeds.get("embedding", {})),
     )
 
@@ -183,15 +194,17 @@ def detect_hardware() -> dict[str, Any]:
                 "max_new_tokens": 512,
             }
         else:
-            # Local RTX 4050 6 GB (or similar <10 GB VRAM GPU)
+            # Local GPU < 10 GB VRAM (e.g. RTX 4050 6 GB).
+            # Run everything locally: LLM in 4-bit, DeBERTa verifier on CUDA:0,
+            # RAGAS judge via local pipeline.  No cloud API calls needed.
             return {
                 "device": "cuda",
                 "vram_gb": round(vram_gb, 1),
                 "free_disk_gb": round(free_gb, 1),
                 "disk_warning": disk_warning,
                 "serving_backend": "local_4bit",
-                "verification_backend": "hf_inference_api",
-                "ragas_judge": "hf_inference_api",
+                "verification_backend": "local",
+                "ragas_judge": "kaggle_pipeline",
                 "max_new_tokens": 256,
             }
     except ImportError:
@@ -200,9 +213,9 @@ def detect_hardware() -> dict[str, Any]:
             "vram_gb": 0.0,
             "free_disk_gb": round(free_gb, 1),
             "disk_warning": disk_warning,
-            "serving_backend": "hf_inference_api",
-            "verification_backend": "hf_inference_api",
-            "ragas_judge": "hf_inference_api",
+            "serving_backend": "local_4bit",
+            "verification_backend": "local",
+            "ragas_judge": "local",
             "max_new_tokens": 256,
         }
 

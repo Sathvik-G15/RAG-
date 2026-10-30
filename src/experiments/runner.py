@@ -5,18 +5,18 @@ from __future__ import annotations
 import json
 import os
 import time
-
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from ..agents.context_builder import infer_profile
 from ..confidence.aeb import AEBResult
 from ..confidence.pipeline import Pipeline
-from ..data.benchmarks import get_benchmark
-from ..models import ClinicalResponse
+from ..data.benchmarks import build_query_prompt, get_benchmark
+from ..models import ClinicalResponse, TriageDecision
 from ..utils.disk_utils import cleanup_after_step, cleanup_gpu_memory, format_progress, safe_save
 
 
@@ -148,7 +148,7 @@ def run_hybrid(pipeline: Pipeline, query: str) -> tuple[ClinicalResponse, int, f
     return response, len(evidence), latency
 
 
-def run_aeb(pipeline: Pipeline, query: str, confidence_threshold: float = 0.85) -> tuple[AEBResult, float]:
+def run_aeb(pipeline: Pipeline, query: str, confidence_threshold: float = 0.70) -> tuple[AEBResult, float]:
     t0 = time.perf_counter()
     patient = infer_profile(query)
     result = pipeline.aeb.run(query, patient=patient, max_k_override=15)
@@ -160,7 +160,7 @@ def evaluate(
     pipeline: Pipeline,
     queries: Sequence[dict],
     method: str = "aeb",
-    confidence_threshold: float = 0.85,
+    confidence_threshold: float = 0.70,
     gc_after_each: bool = False,
 ) -> ExperimentReport:
     results: list[QueryResult] = []
@@ -171,14 +171,9 @@ def evaluate(
         options = q.get("options")
         correct_opt = q.get("correct_option")
 
-        # Global context augmentation: if the benchmark item ships its own context
-        # (e.g. PubMedQA abstracts, MedMCQA explanations), prepend it so that every
-        # retrieval path sees it — no dataset-specific branching needed.
-        provided_context = (q.get("context") or "").strip()
-        if provided_context:
-            query = f"[Context]\n{provided_context[:1500]}\n\n[Question]\n{raw_query}"
-        else:
-            query = raw_query
+        # Build a prompt-engineered query string that includes MCQ options (if any)
+        # and any provided clinical context (PubMedQA abstracts, MTSamples transcriptions).
+        query = build_query_prompt(q)
 
         if method == "vanilla":
             resp, k, latency = run_vanilla(pipeline, query)
@@ -222,7 +217,7 @@ def evaluate(
                 retrieval_k=aeb.total_retrieved,
                 steps=len(aeb.steps),
                 budget_exhausted=aeb.budget_exhausted,
-                abstained=resp.decision.value == "escalate",
+                abstained=resp.decision == TriageDecision.ESCALATE,
             )
         results.append(result)
 
@@ -261,7 +256,7 @@ def run_threshold_sweep(
     """Run evaluation across multiple confidence thresholds to generate abstention curve."""
     if thresholds is None:
         thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-    
+
     reports = []
     for threshold in thresholds:
         print(f"Running evaluation at threshold={threshold:.2f}...")
@@ -272,7 +267,7 @@ def run_threshold_sweep(
             (out_dir / f"report_aeb_threshold_{threshold:.2f}.json").write_text(
                 json.dumps(asdict(report), indent=2, default=str)
             )
-    
+
     if out_dir:
         # Save sweep summary
         sweep_data = {
@@ -289,7 +284,7 @@ def run_threshold_sweep(
             )
         except OSError as e:
             print(f"⚠️  Could not save threshold sweep: {e}")
-    
+
     return reports
 
 
@@ -303,20 +298,20 @@ def run_all(
     """Run all evaluations and save results."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     all_results = {}
-    
+
     # 1. Run benchmarks
     if benchmarks is None:
         benchmarks = ["medqa", "pubmedqa", "seeds"]
-    
+
     for bench_name in benchmarks:
         if bench_name == "seeds":
             from ..data.seed_corpus import get_seed_queries
             queries = get_seed_queries()
         else:
             queries = get_benchmark(bench_name)
-        
+
         print(f"\n=== Evaluating on {bench_name.upper()} ({len(queries)} queries) ===")
         bench_results = {}
         for method in ("vanilla", "hybrid", "aeb"):
@@ -331,18 +326,18 @@ def run_all(
                 print(f"⚠️  Could not save {bench_name}/{method}: {e}")
             cleanup_after_step(f"{bench_name}-{method}")
         all_results[bench_name] = bench_results
-    
+
     # 2. Run threshold sweep on AEB
     if thresholds:
-        print(f"\n=== Running threshold sweep on seeds ===")
+        print("\n=== Running threshold sweep on seeds ===")
         from ..data.seed_corpus import get_seed_queries
         seed_queries = get_seed_queries()
         run_threshold_sweep(pipeline, seed_queries, thresholds, out_dir)
-    
+
     # Save combined results
     combined_path = out_dir / "eval_combined.json"
     combined_path.write_text(json.dumps(all_results, indent=2, default=str))
-    
+
     return all_results
 
 
@@ -361,33 +356,35 @@ def summarize(reports: dict[str, ExperimentReport]) -> str:
 def main():
     import argparse
     from pathlib import Path
-    
+
     parser = argparse.ArgumentParser(description="Run CAAR-CDSS evaluation")
-    parser.add_argument("--mode", type=str, default="mock", 
+    parser.add_argument("--mode", type=str, default="mock",
                         choices=["mock", "real", "local_4bit", "kaggle_fp16", "hf_api"],
                         help="LLM inference backend mode")
-    parser.add_argument("--benchmarks", nargs="+", default=["seeds"], 
-                        choices=["medqa", "pubmedqa", "medmcqa", "seeds"],
+    parser.add_argument("--benchmarks", nargs="+", default=["seeds"],
+                        choices=["medqa", "pubmedqa", "mmlumed", "ddxplus", "seeds"],
                         help="Benchmarks to run")
-    parser.add_argument("--n", type=int, default=200, help="Number of queries per benchmark")
+    parser.add_argument("--n", type=int, default=500, help="Number of queries per benchmark")
     parser.add_argument("--output", "--output-dir", dest="output", type=str, default="experiments/results", help="Output directory")
     parser.add_argument("--chroma-dir", type=str, default=None, help="Path to pre-ingested ChromaDB directory")
     parser.add_argument("--threshold-sweep", action="store_true", help="Run threshold sweep for abstention curve")
     parser.add_argument("--embedding-ablation", action="store_true", help="Run embedding model ablation")
-    parser.add_argument("--thresholds", nargs="+", type=float, 
+    parser.add_argument("--thresholds", nargs="+", type=float,
                         default=[0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95],
                         help="Confidence thresholds for sweep")
     parser.add_argument("--gc-after-each", action="store_true",
                         help="Run GPU memory + GC cleanup after each query (slower but prevents OOM)")
-    
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-run even if report files already exist")
+
     args = parser.parse_args()
-    
+
     prefer_real = (args.mode != "mock")
     if args.chroma_dir and Path(args.chroma_dir).exists():
         pipeline = Pipeline.from_corpus(chroma_dir=args.chroma_dir, prefer_real=prefer_real)
     else:
         pipeline = Pipeline.from_seed(prefer_real=prefer_real)
-    
+
     # Determine queries based on benchmarks
     all_queries = {}
     for bench_name in args.benchmarks:
@@ -396,20 +393,42 @@ def main():
             all_queries[bench_name] = get_seed_queries()
         else:
             all_queries[bench_name] = get_benchmark(bench_name)[:args.n]
-    
+
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Run evaluations
     all_results = {}
     for bench_name, queries in all_queries.items():
         print(f"\n=== Evaluating on {bench_name.upper()} ({len(queries)} queries) ===", flush=True)
         bench_results = {}
         for method in ("vanilla", "hybrid", "aeb"):
+            report_path = Path(args.output) / f"report_{bench_name}_{method}.json"
+            if not args.force and report_path.exists():
+                print(f"  [{method}] Skipping — report already exists: {report_path.name}", flush=True)
+                try:
+                    loaded_data = json.loads(report_path.read_text(encoding="utf-8"))
+                    report = ExperimentReport(
+                        method=loaded_data.get("method", method),
+                        n=loaded_data.get("n", len(queries)),
+                        accuracy=loaded_data.get("accuracy", 0.0),
+                        avg_confidence=loaded_data.get("avg_confidence", 0.0),
+                        avg_hallucination=loaded_data.get("avg_hallucination", 0.0),
+                        avg_latency_ms=loaded_data.get("avg_latency_ms", 0.0),
+                        avg_retrieval_k=loaded_data.get("avg_retrieval_k", 0.0),
+                        avg_steps=loaded_data.get("avg_steps", 0.0),
+                        budget_exhausted_rate=loaded_data.get("budget_exhausted_rate", 0.0),
+                        abstention_rate=loaded_data.get("abstention_rate", 0.0),
+                        results=loaded_data.get("results"),
+                    )
+                    bench_results[method] = report
+                    continue
+                except Exception as e:
+                    print(f"⚠️  Could not load existing {report_path.name}: {e}. Re-running...", flush=True)
+
             report = evaluate(pipeline, queries, method=method, gc_after_each=args.gc_after_each)
             bench_results[method] = report
             # Safe-save individual report
-            report_path = Path(args.output) / f"report_{bench_name}_{method}.json"
             try:
                 safe_save(
                     json.dumps(asdict(report), indent=2, default=str),
@@ -422,7 +441,7 @@ def main():
             cleanup_after_step(f"{bench_name}-{method}")
 
         all_results[bench_name] = bench_results
-    
+
     # Save combined results
     combined_path = Path(args.output) / "eval_combined.json"
     try:
@@ -433,13 +452,13 @@ def main():
     except OSError as e:
         print(f"⚠️  Could not save combined results: {e}", flush=True)
         print(json.dumps(all_results, indent=2, default=str), flush=True)
-    
+
     # Run threshold sweep if requested
     if args.threshold_sweep:
         from ..data.seed_corpus import get_seed_queries
         seed_queries = get_seed_queries()
         run_threshold_sweep(pipeline, seed_queries, args.thresholds, Path(args.output))
-    
+
     print("\n=== Summary ===", flush=True)
     for bench_name, bench_results in all_results.items():
         print(f"\n{bench_name.upper()}:", flush=True)

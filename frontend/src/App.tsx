@@ -1,20 +1,18 @@
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { AuthProvider, useAuthContext } from './contexts/AuthProvider';
 import { ThemeProvider } from './contexts/ThemeProvider';
-import { Header, Footer, PageContainer } from './components/layout';
+import { Header, Footer } from './components/layout';
 import { ErrorBoundary } from './components/feedback/ErrorBoundary';
-import { PatientPortal, DoctorDashboard, AdminDashboard, CorpusStats, LoginPage } from './pages';
+import { PatientPortal, LoginPage } from './pages';
 
 function ProtectedRoute() {
   const { isAuthenticated, isLoading } = useAuthContext();
 
   if (isLoading) {
     return (
-      <PageContainer>
-        <div className="flex min-h-[400px] items-center justify-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-2 border-medical-primary-600 border-t-transparent" aria-label="Loading" />
-        </div>
-      </PageContainer>
+      <div className="flex min-h-[400px] items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-2 border-medical-primary-600 border-t-transparent" aria-label="Loading" />
+      </div>
     );
   }
 
@@ -52,9 +50,6 @@ function AppRoutes() {
 
       <Route element={<ProtectedRoute />}>
         <Route path="/" element={<PatientPortal />} />
-        <Route path="/doctor" element={<DoctorDashboard />} />
-        <Route path="/admin" element={<AdminDashboard />} />
-        <Route path="/corpus" element={<CorpusStats />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -68,7 +63,7 @@ function AppLayout() {
       <ErrorBoundary>
         <Header />
       </ErrorBoundary>
-      <main className="flex-1">
+      <main className="flex-1 container-page py-8" id="main-content" aria-label="Main content">
         <ErrorBoundary>
           <AppRoutes />
         </ErrorBoundary>

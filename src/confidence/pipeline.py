@@ -38,17 +38,18 @@ class Pipeline:
         self.model_name = model_name
 
     @classmethod
-    def from_seed(cls, prefer_real: bool = False) -> Pipeline:
-        """Build pipeline from the bundled seed corpus (no downloads needed)."""
-        from ..data.seed_corpus import SEED_CORPUS
+    def from_unified_kb(cls, kb_path: str | Path | None = None, prefer_real: bool = False) -> Pipeline:
+        """Build pipeline from the single unified clinical knowledge base."""
+        from ..data.unified_kb import load_unified_kb
 
         set_global_seeds(42)
         cfg = get_app_config()
 
+        documents = load_unified_kb(kb_path)
         embedder = make_embedder(cfg.embedding.model_name, prefer_real=prefer_real)
         store = make_vector_store(backend="memory")
         kb = KnowledgeBase(embedder=embedder, store=store)
-        kb.add_documents(SEED_CORPUS)
+        kb.add_documents(documents)
 
         reranker = make_reranker(prefer_real=prefer_real)
         retriever = HybridRetriever(
@@ -75,6 +76,11 @@ class Pipeline:
             prefer_real_llm=prefer_real,
             model_name=cfg.llm.model_name,
         )
+
+    @classmethod
+    def from_seed(cls, prefer_real: bool = False) -> Pipeline:
+        """Build pipeline (delegates to the single unified clinical knowledge base)."""
+        return cls.from_unified_kb(prefer_real=prefer_real)
 
     @classmethod
     def from_corpus(

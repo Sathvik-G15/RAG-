@@ -1,5 +1,5 @@
 embeddings:
-  model_name: "pritamdeka/S-PubMedBert-MS-MARCO"
+  model_name: "BAAI/bge-small-en-v1.5"
   device: "cuda"
   normalize: true
   batch_size: 32
@@ -10,9 +10,10 @@ chunking:
   splitter: "recursive"
 
 vector_db:
-  backend: "qdrant"
+  backend: "chroma"
   collection: "medical_kb"
   distance: "cosine"
+  persist_dir: "data/chroma_db"
 
 sources:
   guidelines:
@@ -23,7 +24,6 @@ sources:
   datasets:
     - pubmedqa
     - medqa
-    - medmcqa
     - bioasq
 
 trust_scores:

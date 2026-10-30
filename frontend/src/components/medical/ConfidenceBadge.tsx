@@ -1,9 +1,26 @@
 import { Badge } from '../ui';
 
+export type RiskLevel =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'critical'
+  | 'emergency'
+  | 'urgent'
+  | 'routine'
+  | 'home_care';
+
+export type TriageDecision =
+  | 'diagnose'
+  | 'escalate'
+  | 'abstain'
+  | 'answer'
+  | 'ask_followup';
+
 interface ConfidenceBadgeProps {
   confidence: number;
-  decision: 'diagnose' | 'escalate' | 'abstain';
-  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  decision: TriageDecision;
+  riskLevel: RiskLevel;
   hallucinationScore?: number;
   showDetails?: boolean;
 }
@@ -23,6 +40,10 @@ export function ConfidenceBadge({
     variant = 'danger';
     label = 'Escalated - Clinician Review Required';
     icon = '🔴';
+  } else if (decision === 'ask_followup') {
+    variant = 'warning';
+    label = 'Follow-up Required';
+    icon = '🟡';
   } else if (confidence >= 0.85) {
     variant = 'success';
     label = 'High Confidence';
@@ -37,12 +58,16 @@ export function ConfidenceBadge({
     icon = '🔴';
   }
 
-  const riskColors = {
+  const riskColors: Record<RiskLevel, 'success' | 'warning' | 'danger' | 'info'> = {
     low: 'success',
+    home_care: 'success',
     medium: 'warning',
+    routine: 'warning',
     high: 'danger',
+    urgent: 'danger',
     critical: 'danger',
-  } as const;
+    emergency: 'danger',
+  };
 
   return (
     <Badge variant={variant} dot size="md" className="w-full justify-center gap-2">
@@ -54,7 +79,7 @@ export function ConfidenceBadge({
         <span className="text-xs opacity-80 flex flex-wrap items-center gap-2">
           <span>Confidence: {Math.round(confidence * 100)}%</span>
           <span>Decision: {decision}</span>
-          <Badge variant={riskColors[riskLevel]} size="sm" className="px-1.5 py-0">
+          <Badge variant={riskColors[riskLevel] || 'info'} size="sm" className="px-1.5 py-0">
             Risk: {riskLevel}
           </Badge>
           {hallucinationScore !== undefined && hallucinationScore > 0.3 && (

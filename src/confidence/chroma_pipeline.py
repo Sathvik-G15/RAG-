@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
-
-import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from ..agents.context_builder import infer_profile
 from ..agents.reasoner import make_reasoner
 from ..config import get_app_config, set_global_seeds
-from ..kb.embedder import BaseEmbedder
-from ..models import ClinicalResponse, PatientProfile, Visit
-from ..retrieval.chroma_retriever import ChromaRetriever
+from ..kb.embedder import make_embedder
+from ..kb.vector_store import make_vector_store
+from ..models import ClinicalResponse, PatientProfile, TriageDecision, Visit
 from ..retrieval.hybrid import HybridConfig, HybridRetriever
 from ..retrieval.rerank import make_reranker
 from ..retrieval.sparse import BM25Index
@@ -21,20 +17,6 @@ from ..verification.verifier import make_verifier
 from .aeb import AEBPipeline, AEBResult
 from .estimation import ConfidenceModel
 from .triage import assign_risk
-
-
-class STEmbedder(BaseEmbedder):
-    """Wrapper to make SentenceTransformer compatible with BaseEmbedder interface."""
-
-    def __init__(self, model: SentenceTransformer):
-        self._model = model
-
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
-        return self._model.encode(list(texts), convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-
-    @property
-    def dim(self) -> int:
-        return self._model.get_sentence_embedding_dimension()
 
 
 class ChromaPipeline:
@@ -50,25 +32,33 @@ class ChromaPipeline:
         self.reasoner = aeb.reasoner
 
     @classmethod
-    def from_chroma(cls, prefer_real: bool = False) -> ChromaPipeline:
-        """Build pipeline from Chroma DB."""
+    def from_chroma(cls, prefer_real: bool = True, reasoner_backend: str = "mock", chroma_dir: str | Path = "data/chroma_db") -> ChromaPipeline:
+        """Build pipeline from Chroma DB.
+
+        Args:
+            prefer_real: If True, use real SentenceTransformer embedder to match ChromaDB dimension.
+                        If False, use HashEmbedder (512-dim) - will fail if ChromaDB has different dim.
+            reasoner_backend: Backend for the reasoner ("mock", "local_4bit", "kaggle_fp16", "hf_api").
+            chroma_dir: Path to ChromaDB persistence directory.
+        """
         set_global_seeds(42)
         cfg = get_app_config()
 
-        # Use Chroma retriever for dense search
-        chroma_retriever = ChromaRetriever()
+        # Use ChromaVectorStore for dense search (via factory)
+        chroma_store = make_vector_store(backend="chroma", persist_dir=chroma_dir)
 
-        # Wrap SentenceTransformer for HybridRetriever compatibility
-        embedder = STEmbedder(chroma_retriever.embedder)
+        # Use the configured embedder (must match the dimension of existing ChromaDB)
+        # Default to prefer_real=True to get the real SentenceTransformer embedder
+        embedder = make_embedder(cfg.embedding.model_name, prefer_real=True)
 
         # BM25 index for sparse retrieval (we'll create from Chroma data)
         bm25 = BM25Index()
 
         # Get all chunks from Chroma for BM25
-        all_results = chroma_retriever.collection.get()
+        all_results = chroma_store._collection.get()
         if all_results and all_results["documents"]:
             chunks = []
-            for doc, metadata in zip(all_results["documents"], all_results["metadatas"]):
+            for doc, metadata in zip(all_results["documents"], all_results["metadatas"], strict=False):
                 import uuid
 
                 from ..models import EvidenceChunk
@@ -88,13 +78,13 @@ class ChromaPipeline:
         reranker = make_reranker(prefer_real=prefer_real)
         retriever = HybridRetriever(
             embedder=embedder,
-            store=chroma_retriever,  # Uses Chroma for dense search
+            store=chroma_store,  # ChromaVectorStore IS a BaseVectorStore
             bm25=bm25,
             reranker=reranker,
             config=HybridConfig(final_top_k=cfg.retrieval.final_top_k),
         )
 
-        reasoner = make_reasoner(prefer_real=prefer_real, model_name=cfg.llm.model_name)
+        reasoner = make_reasoner(backend=reasoner_backend, prefer_real=(reasoner_backend != "mock"), model_name=cfg.llm.model_name)
         verifier = make_verifier(prefer_real=prefer_real)
         confidence_model = ConfidenceModel()
         aeb = AEBPipeline(
@@ -163,7 +153,7 @@ def run_chroma_evaluation(max_samples: int = 20):
                 retrieved_contexts=[c.text for c in response.evidence],
                 confidence=response.confidence,
                 hallucination_score=response.hallucination_score,
-                abstained=response.decision.value == "escalate",
+                abstained=response.decision == TriageDecision.ESCALATE,
             )
             result.answer_correct = (response.primary_diagnosis == expected)
             result.abstention_correct = harness._check_abstention_correct(result.abstained, result.answer_correct)

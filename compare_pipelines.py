@@ -13,7 +13,8 @@ for q in SEED_PATIENT_QUERIES:
 
 print()
 print('=== CHROMA PIPELINE ===')
-pipeline2 = ChromaPipeline.from_chroma()
+# Use prefer_real=True for embedder (to match ChromaDB dim), but False for reasoner (mock mode)
+pipeline2 = ChromaPipeline.from_chroma(prefer_real=False)
 for q in SEED_PATIENT_QUERIES:
     aeb, resp = pipeline2.analyze(q['query'])
     print(f'  {q["expected_dx"]}: dx={resp.primary_diagnosis} conf={resp.confidence:.3f} dec={resp.decision.value}')

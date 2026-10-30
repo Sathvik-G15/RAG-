@@ -50,7 +50,7 @@ class OverlapReranker(BaseReranker):
     ) -> list[tuple[EvidenceChunk, float]]:
         q_terms = self._query_terms(query)
         if not q_terms:
-            return list(zip(chunks[:top_k], [0.0] * min(top_k, len(chunks))))
+            return list(zip(chunks[:top_k], [0.0] * min(top_k, len(chunks)), strict=False))
 
         scored: list[tuple[EvidenceChunk, float]] = []
         for ch in chunks:
@@ -66,10 +66,11 @@ class OverlapReranker(BaseReranker):
 class CrossEncoderReranker(BaseReranker):
     """HuggingFace cross-encoder reranker (lazy-loaded)."""
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2", device: str | None = "cpu"):
         from sentence_transformers import CrossEncoder
 
-        self._ce = CrossEncoder(model_name, max_length=512)
+        device = device or "cpu"
+        self._ce = CrossEncoder(model_name, max_length=512, device=device)
 
     def rerank(
         self,
@@ -79,16 +80,17 @@ class CrossEncoderReranker(BaseReranker):
     ) -> list[tuple[EvidenceChunk, float]]:
         pairs = [(query, (c.title or "") + " " + c.text[:1500]) for c in chunks]
         scores = self._ce.predict(pairs, show_progress_bar=False).astype(np.float32)
-        scored = list(zip(chunks, scores.tolist()))
+        scored = list(zip(chunks, scores.tolist(), strict=False))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 
 
-def make_reranker(prefer_real: bool = False, model_name: str | None = None) -> BaseReranker:
+def make_reranker(prefer_real: bool = False, model_name: str | None = None, device: str | None = "cpu") -> BaseReranker:
     """Factory that creates OverlapReranker or CrossEncoderReranker.
-    
+
     If prefer_real=True and model_name provided, failures will raise.
     """
     if not prefer_real or not model_name:
         return OverlapReranker()
-    return CrossEncoderReranker(model_name=model_name)
+    return CrossEncoderReranker(model_name=model_name, device=device)
+

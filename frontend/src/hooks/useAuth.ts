@@ -1,34 +1,19 @@
-import { useState, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { api, type LoginRequest } from '../lib';
-import { getAuthToken, setAuthToken, clearAuthToken, getAuthMode } from '../lib/auth';
+import { useAuthContext } from '../contexts/AuthProvider';
+import { type LoginRequest } from '../lib';
 import { toast } from 'sonner';
 
 export function useAuth() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const context = useAuthContext();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const checkAuth = useCallback(async () => {
-    try {
-      const token = await getAuthToken();
-      setIsAuthenticated(!!token);
-    } catch {
-      setIsAuthenticated(false);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
   const login = async (credentials: LoginRequest) => {
     try {
-      const response = await api.post<{ access_token: string }>('/login', credentials);
-      setAuthToken(response.access_token);
-      setIsAuthenticated(true);
+      await context.login(credentials.username, credentials.password);
       toast.success('Welcome back!');
 
-      const from = location.state?.from?.pathname || '/';
+      const from = (location.state as { from?: { pathname?: string } })?.from?.pathname || '/';
       navigate(from, { replace: true });
     } catch (error) {
       toast.error('Invalid credentials');
@@ -37,18 +22,18 @@ export function useAuth() {
   };
 
   const logout = () => {
-    clearAuthToken();
-    setIsAuthenticated(false);
+    context.logout();
     toast.success('Logged out successfully');
     navigate('/login', { replace: true });
   };
 
   return {
-    isAuthenticated,
-    isLoading,
+    isAuthenticated: context.isAuthenticated,
+    isLoading: context.isLoading,
+    user: context.user,
     login,
     logout,
-    checkAuth,
-    authMode: getAuthMode(),
+    checkAuth: async () => {},
+    authMode: context.authMode,
   };
 }

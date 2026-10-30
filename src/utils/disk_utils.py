@@ -161,16 +161,20 @@ def cleanup_gpu_memory(log_prefix: str = "") -> None:
         import torch
         if torch.cuda.is_available():
             before = torch.cuda.memory_allocated() / (1024**3)
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception as e:
+                logger.warning("CUDA cache clean notice: %s", e)
             after = torch.cuda.memory_allocated() / (1024**3)
             if log_prefix:
                 logger.info(
                     "%s GPU cleanup: %.2f GB → %.2f GB allocated",
                     log_prefix, before, after,
                 )
-    except ImportError:
+    except (ImportError, Exception):
         pass
+
 
 
 def cleanup_after_step(step_name: str, path: str = ".") -> None:

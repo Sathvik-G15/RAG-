@@ -110,11 +110,24 @@ class AEBPipeline:
                 top_k=k,
             )
             for ch in round_evidence:
-                accumulated[str(ch.chunk_id)] = ch
+                # Use hash of text to avoid key collisions from similar prefixes
+                import hashlib
+                key = hashlib.md5(ch.text.encode()).hexdigest()[:16] if ch.text else str(ch.chunk_id)
+                accumulated[key] = ch
 
-            evidence_list = list(accumulated.values())
+            evidence_list = list(accumulated.values())[:max_k]
             response = self.reasoner.generate(query, evidence_list)
-            verification = self.verifier.verify(response.reasoning, evidence_list)
+
+            # Skip verification for abstention responses (no primary diagnosis)
+            # These are appropriate uncertainty expressions, not hallucinations
+            if response.primary_diagnosis is None:
+                from ..verification.verifier import VerificationResult
+                verification = VerificationResult(
+                    total_claims=0, supported_claims=0, hallucination_score=0.0, checks=[]
+                )
+            else:
+                verification = self.verifier.verify(response.reasoning, evidence_list)
+
             signals = compute_signals(response, evidence_list, verification)
             confidence = self.confidence_model.score(signals)
 

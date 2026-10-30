@@ -1,70 +1,180 @@
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
 .venv/
 venv/
 env/
-.env
-.env.local
+ENV/
+env.bak/
+venv.bak/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Data & models
-data/raw/
-data/processed/
-data/embeddings/
+# ==============================================================================
+# Machine Learning Models, Weights & Checkpoints
+# ==============================================================================
+models/
+checkpoints/
+weights/
 *.bin
 *.pt
 *.pth
 *.safetensors
-models/
-checkpoints/
+*.onnx
+*.gguf
+*.h5
+*.ckpt
+*.tflite
+*.pkl
+*.pickle
+*.model
 
-# Vector DB & Storage
+# Hugging Face & Cache Dirs
+data/hf_cache/
+hf_cache/
+.cache/
+hub/
+*.incomplete
+*.lock
+
+# ==============================================================================
+# Data & Vector Databases
+# ==============================================================================
+data/raw/
+data/processed/
+data/embeddings/
+data/external/
+data/cache/
+
+# Chroma & Vector DBs
+data/chroma_db/
+data/chroma_test/
+chroma_db/
+chroma_test/
 .qdrant/
 qdrant_storage/
 *.qdrant
-data/chroma_db/
-data/chroma_test/
+
+# SQLite & Local DB files
 *.sqlite3
 *.sqlite
 *.db
+caar_cdss_dev.db
 
-# Logs
-logs/
-*.log
+# ==============================================================================
+# Testing, Linting & Coverage
+# ==============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
 
-# Frontend
-frontend/node_modules/
-frontend/dist/
-frontend/build/
-frontend/.next/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Secrets
-*.pem
-*.key
-secrets/
-
-# Experiments output
+# ==============================================================================
+# Experiment Outputs & Run Artifacts
+# ==============================================================================
 experiments/runs/
+experiments/results/*/
 experiments/results/*.csv
 experiments/results/*.json
 !experiments/results/.gitkeep
-/experiments/
+results_extracted*/
+results_local*/
+wandb/
+mlruns/
 
+# ==============================================================================
+# Frontend (Vite / React / Node)
+# ==============================================================================
+frontend/node_modules/
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.next/
+frontend/test-results/
+frontend/playwright-report/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Paper
+# ==============================================================================
+# Secrets & Environment Configurations
+# ==============================================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+secrets/
+
+# ==============================================================================
+# Operating System & IDE Artifacts
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# Logs, Archives & Temporary Files
+# ==============================================================================
+logs/
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.tmp
+*.temp
+
+# Temporary text dumps / plans
+pdf*_text.txt
+capstone_proposal_text.txt
+implementation_plan*
+
+# ==============================================================================
+# LaTeX / Paper Build Artifacts
+# ==============================================================================
 paper/*.aux
 paper/*.bbl
 paper/*.blg
@@ -72,11 +182,5 @@ paper/*.log
 paper/*.synctex.gz
 paper/*.out
 paper/*.toc
-
-
-#scripts
-scripts
-
-# Archives
-*.zip
-
+paper/*.fdb_latexmk
+paper/*.fls

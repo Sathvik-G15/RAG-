@@ -1,9 +1,9 @@
 import { config } from './config';
 
 const TOKEN_KEY = 'caar_cdss_token';
-const REFRESH_THRESHOLD = 60 * 1000; // 1 minute before expiry
+const EXPIRY_BUFFER_MS = 60 * 1000; // treat token as expired 1 minute early
 
-interface TokenPayload {
+export interface TokenPayload {
   sub: string;
   exp: number;
   iat: number;
@@ -11,9 +11,8 @@ interface TokenPayload {
 }
 
 let memoryToken: string | null = null;
-let refreshPromise: Promise<string> | null = null;
 
-function parseJwt(token: string): TokenPayload | null {
+export function parseJwt(token: string): TokenPayload | null {
   try {
     const base64Url = token.split('.')[1];
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
@@ -29,42 +28,10 @@ function parseJwt(token: string): TokenPayload | null {
   }
 }
 
-function isTokenExpiringSoon(token: string): boolean {
+function isTokenExpired(token: string): boolean {
   const payload = parseJwt(token);
   if (!payload?.exp) return true;
-  const expiryTime = payload.exp * 1000;
-  return Date.now() + REFRESH_THRESHOLD >= expiryTime;
-}
-
-async function doRefreshToken(): Promise<string> {
-  const response = await fetch(`${config.VITE_API_URL}/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'doctor', password: 'x' }),
-    credentials: config.VITE_AUTH_MODE === 'cookie' ? 'include' : 'omit',
-  });
-
-  if (!response.ok) {
-    throw new Error('Failed to refresh token');
-  }
-
-  const data = await response.json();
-  return data.access_token;
-}
-
-async function refreshToken(): Promise<string> {
-  if (refreshPromise) return refreshPromise;
-
-  refreshPromise = doRefreshToken().finally(() => {
-    refreshPromise = null;
-  });
-
-  try {
-    return await refreshPromise;
-  } catch {
-    clearAuthToken();
-    throw new Error('Token refresh failed');
-  }
+  return Date.now() + EXPIRY_BUFFER_MS >= payload.exp * 1000;
 }
 
 export async function getAuthToken(): Promise<string | null> {
@@ -72,35 +39,20 @@ export async function getAuthToken(): Promise<string | null> {
     return null;
   }
 
-  if (memoryToken && !isTokenExpiringSoon(memoryToken)) {
+  // Use in-memory token if still valid
+  if (memoryToken && !isTokenExpired(memoryToken)) {
     return memoryToken;
   }
 
-  if (memoryToken) {
-    try {
-      memoryToken = await refreshToken();
-      return memoryToken;
-    } catch {
-      return null;
-    }
-  }
-
+  // Fall back to session storage
   const stored = sessionStorage.getItem(TOKEN_KEY);
-  if (stored && !isTokenExpiringSoon(stored)) {
+  if (stored && !isTokenExpired(stored)) {
     memoryToken = stored;
     return memoryToken;
   }
 
-  if (stored) {
-    try {
-      memoryToken = await refreshToken();
-      sessionStorage.setItem(TOKEN_KEY, memoryToken);
-      return memoryToken;
-    } catch {
-      return null;
-    }
-  }
-
+  // Token is expired or missing — clear and return null (caller redirects to login)
+  clearAuthToken();
   return null;
 }
 

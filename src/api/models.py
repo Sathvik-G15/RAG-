@@ -131,43 +131,6 @@ class CorpusStatsResponse(BaseModel):
     last_updated: datetime | None = None
 
 
-class GuidelineUploadRequest(BaseModel):
-    source: str = Field(..., description="Source identifier (e.g., WHO, NICE)")
-    title: str | None = None
-    year: int | None = None
-    trust_score: float = Field(default=0.8, ge=0.0, le=1.0)
-
-
-class GuidelineUploadResponse(BaseModel):
-    status: str
-    chunks_added: int
-    document_id: str | None = None
-
-
-class ReviewRequest(BaseModel):
-    hallucination_flag: bool | None = None
-    notes: str | None = None
-    reviewer: str | None = None
-
-
-class ReviewResponse(BaseModel):
-    id: str
-    query_log_id: str | None = None
-    evaluation_id: str | None = None
-    hallucination_flag: bool | None
-    notes: str | None
-    reviewer: str | None
-    created_at: datetime
-
-
-class CorpusStatsResponse(BaseModel):
-    total_chunks: int
-    total_documents: int
-    specialty_distribution: dict[str, int]
-    source_distribution: dict[str, int]
-    last_updated: datetime | None = None
-
-
 class EvaluationRunCreate(BaseModel):
     method: str = Field(..., pattern="^(vanilla|hybrid|aeb)$")
     benchmark: str = Field(..., pattern="^(medqa|pubmedqa|seeds)$")

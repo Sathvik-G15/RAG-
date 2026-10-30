@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RiskLevel(str, Enum):
@@ -76,6 +76,29 @@ class DifferentialDiagnosis(BaseModel):
     sources: list[str] = Field(default_factory=list)
     query_signal: bool = False
 
+    @field_validator("supporting_evidence", "sources", mode="before")
+    @classmethod
+    def _coerce_str_list(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v_str = v.strip()
+            return [v_str] if v_str else []
+        if isinstance(v, (list, tuple, set)):
+            return [str(item).strip() for item in v if item is not None and str(item).strip()]
+        return [str(v)]
+
+    @field_validator("probability", mode="before")
+    @classmethod
+    def _coerce_probability(cls, v: Any) -> float:
+        if v is None:
+            return 0.5
+        try:
+            val = float(v)
+            return max(0.0, min(1.0, val))
+        except (ValueError, TypeError):
+            return 0.5
+
 
 class ClinicalResponse(BaseModel):
     visit_id: UUID | None = None
@@ -94,3 +117,15 @@ class ClinicalResponse(BaseModel):
         "This is an AI-assisted analysis for research purposes only. "
         "It does not replace professional medical advice. Always consult a qualified clinician."
     )
+
+    @field_validator("confidence", "uncertainty", "hallucination_score", mode="before")
+    @classmethod
+    def _coerce_floats(cls, v: Any) -> float:
+        if v is None:
+            return 0.0
+        try:
+            val = float(v)
+            return max(0.0, min(1.0, val))
+        except (ValueError, TypeError):
+            return 0.0
+

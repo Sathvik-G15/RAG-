@@ -23,34 +23,43 @@ from __future__ import annotations
 import hashlib
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt
-from datetime import datetime
 
+from ..confidence.pipeline import Pipeline
+from ..data.seed_corpus import get_seed_queries
+from ..experiments.runner import evaluate
+from ..models import PatientProfile, Visit, Vitals
+from .database import (
+    EvaluationRun,
+    QueryLog,
+    add_review,
+    create_engine_and_session,
+    create_evaluation_run,
+    get_query_log,
+    init_db,
+    log_query,
+    update_corpus_stats,
+    update_evaluation_run,
+)
 from .models import (
     AnalyzeRequest,
     CorpusStatsResponse,
+    EvaluationResultsResponse,
     EvaluationRunRequest,
     EvaluationRunResponse,
-    EvaluationResultsResponse,
     FeedbackRequest,
-    GuidelineUploadRequest,
     GuidelineUploadResponse,
     LoginRequest,
     QueryHistoryResponse,
     ReviewRequest,
     ReviewResponse,
 )
-
-from .database import create_engine_and_session, init_db
-from ..confidence.pipeline import Pipeline
-from ..data.seed_corpus import get_seed_queries
-from ..experiments.runner import evaluate
-from ..models import PatientProfile, Visit
 
 # Database setup
 _database_engine = None
@@ -85,7 +94,7 @@ JWT_ALG = "HS256"
 def get_pipeline() -> Pipeline:
     global _pipeline
     if _pipeline is None:
-        _pipeline = Pipeline.from_seed()
+        _pipeline = Pipeline.from_unified_kb()
     return _pipeline
 
 
@@ -143,7 +152,27 @@ async def analyze(
         medications=req.medications,
         allergies=req.allergies,
     )
-    visit = Visit(vitals=req.vitals) if req.vitals else None
+
+    visit_vitals = None
+    if req.vitals:
+        if isinstance(req.vitals, dict):
+            mapped_vitals = {
+                "systolic_bp": req.vitals.get("systolic_bp") if req.vitals.get("systolic_bp") is not None else req.vitals.get("bloodPressureSystolic"),
+                "diastolic_bp": req.vitals.get("diastolic_bp") if req.vitals.get("diastolic_bp") is not None else req.vitals.get("bloodPressureDiastolic"),
+                "heart_rate": req.vitals.get("heart_rate") if req.vitals.get("heart_rate") is not None else req.vitals.get("heartRate"),
+                "respiratory_rate": req.vitals.get("respiratory_rate") if req.vitals.get("respiratory_rate") is not None else req.vitals.get("respiratoryRate"),
+                "temperature": req.vitals.get("temperature"),
+                "oxygen_saturation": req.vitals.get("oxygen_saturation") if req.vitals.get("oxygen_saturation") is not None else req.vitals.get("oxygenSaturation"),
+                "blood_glucose": req.vitals.get("blood_glucose") if req.vitals.get("blood_glucose") is not None else req.vitals.get("bloodGlucose"),
+            }
+            mapped_vitals = {k: v for k, v in mapped_vitals.items() if v is not None}
+            visit_vitals = Vitals(**mapped_vitals) if mapped_vitals else Vitals()
+        elif isinstance(req.vitals, Vitals):
+            visit_vitals = req.vitals
+        else:
+            visit_vitals = Vitals()
+
+    visit = Visit(vitals=visit_vitals) if visit_vitals else None
 
     aeb, resp = pipeline.analyze(req.query, visit=visit, patient=patient)
 
@@ -184,7 +213,9 @@ async def analyze(
             "comorbidities": req.comorbidities,
             "medications": req.medications,
             "allergies": req.allergies,
-            "vitals": req.vitals.model_dump() if req.vitals else None,
+            "vitals": visit_vitals.model_dump() if visit_vitals else (
+                req.vitals.model_dump() if hasattr(req.vitals, "model_dump") else req.vitals
+            ),
         }
         await log_query(db, req.query, _hash_query(req.query), response, patient_dict)
 
@@ -244,7 +275,10 @@ async def feedback(
 
 @app.post("/guidelines/upload", response_model=GuidelineUploadResponse)
 async def upload_guideline(
-    request: GuidelineUploadRequest,
+    source: str = Form(...),
+    title: str | None = Form(None),
+    year: int | None = Form(None),
+    trust_score: float = Form(0.8),
     file: UploadFile = File(...),
     auth: str = Depends(require_auth),
     db=Depends(get_db_session),
@@ -254,20 +288,44 @@ async def upload_guideline(
     kb = pipeline.kb
 
     content = await file.read()
+    text = ""
+
     if file.content_type == "application/pdf":
-        # For PDF, we'd need pdfplumber - for now treat as text
-        text = content.decode("utf-8", errors="ignore")
+        # Parse PDF using pdfplumber
+        import io
+
+        import pdfplumber
+
+        pdf_file = io.BytesIO(content)
+        text_parts = []
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+        text = "\n\n".join(text_parts)
+
+        if not text.strip():
+            # Fallback: try to decode as text (some PDFs are actually text files)
+            text = content.decode("utf-8", errors="ignore")
     else:
         text = content.decode("utf-8", errors="ignore")
+
+    if not text.strip():
+        return GuidelineUploadResponse(
+            status="error",
+            chunks_added=0,
+            document_id=title or file.filename,
+        )
 
     chunks = kb.add_documents(
         [
             {
                 "text": text,
-                "source": request.source,
-                "title": request.title or file.filename,
-                "year": request.year,
-                "trust_score": request.trust_score,
+                "source": source,
+                "title": title or file.filename,
+                "year": year,
+                "trust_score": trust_score,
             }
         ]
     )
@@ -275,7 +333,7 @@ async def upload_guideline(
     return GuidelineUploadResponse(
         status="success",
         chunks_added=chunks,
-        document_id=request.title or file.filename,
+        document_id=title or file.filename,
     )
 
 
@@ -286,6 +344,8 @@ async def get_query_history(
     db=Depends(get_db_session),
 ) -> QueryHistoryResponse:
     """Retrieve a past query's full response and retrieved evidence."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
     query_log = await get_query_log(db, query_id)
     if not query_log:
         raise HTTPException(status_code=404, detail="Query not found")
@@ -358,6 +418,8 @@ async def run_evaluation(
     db=Depends(get_db_session),
 ) -> EvaluationRunResponse:
     """Trigger a benchmark evaluation run in the background."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
     eval_id = await create_evaluation_run(
         db, request.method, request.benchmark, request.n_samples, request.config
     )
@@ -378,7 +440,7 @@ async def run_evaluation(
         status="pending",
         n_samples=request.n_samples,
         config=request.config,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
         completed_at=None,
     )
 
@@ -390,6 +452,8 @@ async def get_evaluation_results(
     db=Depends(get_db_session),
 ) -> EvaluationResultsResponse:
     """Fetch evaluation run results."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
     from sqlalchemy import select
 
     result = await db.execute(select(EvaluationRun).where(EvaluationRun.id == eval_id))
@@ -427,6 +491,8 @@ async def submit_review(
     db=Depends(get_db_session),
 ) -> ReviewResponse:
     """Submit human annotation for a query response or evaluation."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
     from sqlalchemy import select
 
     # Verify the query_log or evaluation exists
@@ -461,7 +527,7 @@ async def submit_review(
         hallucination_flag=request.hallucination_flag,
         notes=request.notes,
         reviewer=request.reviewer,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
 
@@ -475,21 +541,45 @@ async def get_corpus_stats(
 
     # Try to get from database cache first
     from .database import CorpusStats
-    result = await db.execute(select(CorpusStats).limit(1))
-    stats = result.scalar_one_or_none()
+    if db is not None:
+        result = await db.execute(select(CorpusStats).limit(1))
+        stats = result.scalar_one_or_none()
 
-    if stats:
-        return CorpusStatsResponse(
-            total_chunks=stats.total_chunks,
-            total_documents=stats.total_documents,
-            specialty_distribution=stats.specialty_distribution,
-            source_distribution=stats.source_distribution,
-            last_updated=stats.last_updated,
-        )
+        if stats:
+            return CorpusStatsResponse(
+                total_chunks=stats.total_chunks,
+                total_documents=stats.total_documents,
+                specialty_distribution=stats.specialty_distribution,
+                source_distribution=stats.source_distribution,
+                last_updated=stats.last_updated,
+            )
 
-    # Fallback: compute from ChromaDB
+    # Fallback: compute from store (InMemoryVectorStore or ChromaDB)
     pipeline = get_pipeline()
     store = pipeline.kb.store
+
+    if hasattr(store, "_chunks") and store._chunks:
+        total_chunks = len(store._chunks)
+        specialty_dist: dict[str, int] = {}
+        source_dist: dict[str, int] = {}
+        sources: set[str] = set()
+        for c in store._chunks:
+            spec = c.specialty or "general"
+            src = c.source or "unknown"
+            specialty_dist[spec] = specialty_dist.get(spec, 0) + 1
+            source_dist[src] = source_dist.get(src, 0) + 1
+            sources.add(src)
+
+        if db is not None:
+            await update_corpus_stats(db, total_chunks, len(sources), specialty_dist, source_dist)
+
+        return CorpusStatsResponse(
+            total_chunks=total_chunks,
+            total_documents=len(sources),
+            specialty_distribution=specialty_dist,
+            source_distribution=source_dist,
+            last_updated=datetime.now(timezone.utc),
+        )
 
     if hasattr(store, "_collection"):
         total_chunks = store._collection.count()
@@ -504,14 +594,15 @@ async def get_corpus_stats(
             source_dist[src] = source_dist.get(src, 0) + 1
 
         # Update cache
-        await update_corpus_stats(db, total_chunks, len(set(r.get("source") for r in results.get("metadatas", []))), specialty_dist, source_dist)
+        if db is not None:
+            await update_corpus_stats(db, total_chunks, len(set(r.get("source") for r in results.get("metadatas", []))), specialty_dist, source_dist)
 
         return CorpusStatsResponse(
             total_chunks=total_chunks,
             total_documents=len(set(r.get("source") for r in results.get("metadatas", []))),
             specialty_distribution=specialty_dist,
             source_distribution=source_dist,
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(timezone.utc),
         )
 
     return CorpusStatsResponse(

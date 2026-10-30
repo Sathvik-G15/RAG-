@@ -50,3 +50,60 @@ def test_metrics_endpoint() -> None:
     body = client.get("/metrics", headers=h).json()
     assert body["method"] == "aeb"
     assert body["accuracy"] >= 0.9
+
+
+def test_analyze_with_vitals() -> None:
+    h = _auth_header()
+    r = client.post(
+        "/analyze",
+        json={
+            "query": "55-year-old diabetic male with chest pain",
+            "age": 55,
+            "gender": "male",
+            "vitals": {
+                "bloodPressureSystolic": 80,
+                "heartRate": 110,
+            },
+        },
+        headers=h,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["decision"] == "escalate"
+    assert body["risk_level"] == "emergency"
+
+
+def test_retrieve_endpoint() -> None:
+    h = _auth_header()
+    r = client.post(
+        "/retrieve",
+        json={"query": "dysuria and urinary frequency"},
+        headers=h,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "results" in body
+    assert len(body["results"]) > 0
+
+
+def test_corpus_stats_endpoint() -> None:
+    h = _auth_header()
+    r = client.get("/corpus/stats", headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert "total_chunks" in body
+    assert "total_documents" in body
+    assert "specialty_distribution" in body
+    assert "source_distribution" in body
+
+
+def test_feedback_endpoint() -> None:
+    h = _auth_header()
+    r = client.post(
+        "/feedback",
+        json={"query": "test query", "helpful": True, "comment": "good"},
+        headers=h,
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "recorded"
+

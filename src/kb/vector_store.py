@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 import numpy as np
 
@@ -111,7 +111,7 @@ class FAISSVectorStore(BaseVectorStore):
             q = q / q_norm
         scores, idx = self._index.search(q, min(top_k, len(self._chunks)))
         out = []
-        for s, i in zip(scores[0], idx[0]):
+        for s, i in zip(scores[0], idx[0], strict=False):
             if i < 0:
                 continue
             out.append((self._chunks[int(i)], float(s)))
@@ -174,7 +174,7 @@ class ChromaVectorStore(BaseVectorStore):
                 documents=documents[i:end_idx],
                 metadatas=metadatas[i:end_idx],
             )
-        for i, c in zip(ids, chunks):
+        for i, c in zip(ids, chunks, strict=False):
             self._chunks_map[i] = c
 
     def search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[EvidenceChunk, float]]:
@@ -195,20 +195,26 @@ class ChromaVectorStore(BaseVectorStore):
         documents = results["documents"][0] if results.get("documents") else [""] * len(ids)
         metas = results["metadatas"][0] if results.get("metadatas") else [{}] * len(ids)
 
-        for chunk_id, dist, doc_text, meta in zip(ids, distances, documents, metas):
+        for chunk_id, dist, doc_text, meta in zip(ids, distances, documents, metas, strict=False):
             # Cosine distance to similarity: sim = 1.0 - distance
             sim = float(max(0.0, 1.0 - dist))
             if chunk_id in self._chunks_map:
                 chunk = self._chunks_map[chunk_id]
             else:
+                try:
+                    c_id = UUID(str(chunk_id))
+                except (ValueError, TypeError):
+                    c_id = uuid5(NAMESPACE_DNS, str(chunk_id))
                 chunk = EvidenceChunk(
-                    chunk_id=uuid4(),
+                    chunk_id=c_id,
                     text=doc_text,
                     source=meta.get("source", "ChromaDB"),
                     title=meta.get("title", ""),
                     trust_score=float(meta.get("trust_score", 0.90)),
                     metadata=meta,
                 )
+                self._chunks_map[chunk_id] = chunk
+            chunk.similarity_score = sim
             out.append((chunk, sim))
 
         return out
@@ -227,7 +233,7 @@ class ChromaVectorStore(BaseVectorStore):
 
 def make_vector_store(backend: str = "memory", persist_dir: str | Path = "data/chroma_db") -> BaseVectorStore:
     """Factory that creates the requested vector store backend.
-    
+
     If backend is explicitly requested (not "memory"), failures will raise.
     """
     if backend == "chroma":

@@ -4,6 +4,7 @@ import { Button, Select, Card, CardContent, Badge, Table, CardHeader, CardTitle 
 import { ConfidenceBadge, DisclaimerBanner } from '../components/medical';
 import { toast } from 'sonner';
 import { formatPercent } from '../lib/utils';
+import { type AnalyzeResponse } from '../lib/validations';
 
 const PRESETS = [
   { id: 0, label: '55yo diabetic male: central chest pain, sweating, SOB', query: '55-year-old diabetic male presents with central chest pain, sweating, and shortness of breath.' },
@@ -15,24 +16,13 @@ const PRESETS = [
 
 export function DoctorDashboard() {
   const [caseNo, setCaseNo] = useState(0);
-  const [result, setResult] = useState<{
-    primary_diagnosis: string | null;
-    confidence: number;
-    decision: 'diagnose' | 'escalate' | 'abstain';
-    risk_level: 'low' | 'medium' | 'high' | 'critical';
-    hallucination_score: number;
-    retrieval_steps: number;
-    retrieval_k_used: number;
-    confidence_curve: number[];
-    reasoning: string;
-    differential: Array<{ diagnosis: string; probability: number; sources: string[] }>;
-    evidence: Array<{ rank: number; source: string; title: string | null; text: string }>;
-  } | null>(null);
+  const [result, setResult] = useState<AnalyzeResponse | null>(null);
 
   const { mutate: analyze, isPending } = useAnalyze();
 
   const handleRun = () => {
-    const query = PRESETS[caseNo].query;
+    const selectedPreset = PRESETS[caseNo] ?? PRESETS[0];
+    const query = selectedPreset.query;
     analyze(
       { query },
       {
@@ -64,9 +54,13 @@ export function DoctorDashboard() {
             <Select
               label="Clinical Case"
               options={PRESETS.map((p) => ({ value: String(p.id), label: p.label }))}
-              placeholder="Select a case..."
-              onChange={(value) => setCaseNo(Number(value))}
-              defaultValue={String(caseNo)}
+              value={String(caseNo)}
+              onChange={(e) => {
+                const val = Number(e.target.value);
+                if (!isNaN(val)) {
+                  setCaseNo(val);
+                }
+              }}
               disabled={isPending}
             />
 
@@ -90,7 +84,7 @@ export function DoctorDashboard() {
               <ConfidenceBadge
                 confidence={result.confidence}
                 decision={result.decision}
-                riskLevel={result.risk_level as 'low' | 'medium' | 'high' | 'critical'}
+                riskLevel={result.risk_level}
                 hallucinationScore={result.hallucination_score}
               />
             </div>

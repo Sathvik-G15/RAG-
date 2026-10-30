@@ -18,7 +18,9 @@ class ApiError extends Error {
 }
 
 function buildUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
-  const url = new URL(`${config.VITE_API_URL}${path}`);
+  const baseUrl = config.VITE_API_URL.replace(/\/+$/, '');
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const url = new URL(`${baseUrl}${cleanPath}`);
   if (params) {
     Object.entries(params).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
@@ -58,7 +60,15 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const data = response.status !== 204 ? await response.json().catch(() => null) : null;
 
   if (!response.ok) {
-    const message = (data as Record<string, unknown>)?.detail as string || response.statusText;
+    const detail = (data as Record<string, unknown>)?.detail;
+    let message = response.statusText;
+    if (typeof detail === 'string') {
+      message = detail;
+    } else if (Array.isArray(detail)) {
+      message = detail.map((d: any) => d.msg || JSON.stringify(d)).join(', ');
+    } else if (detail) {
+      message = JSON.stringify(detail);
+    }
     throw new ApiError(message, response.status, data);
   }
 

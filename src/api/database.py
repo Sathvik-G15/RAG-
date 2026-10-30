@@ -1,4 +1,4 @@
-"""PostgreSQL database layer for CAAR-CDSS API."""
+"""PostgreSQL/SQLite database layer for CAAR-CDSS API."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -24,17 +24,76 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import CHAR, TypeDecorator
+from sqlalchemy.types import JSON as SA_JSON
 
 
 class Base(DeclarativeBase):
     pass
 
 
+# Cross-database compatible types
+def get_json_type():
+    """Return appropriate JSON type based on dialect."""
+    return PG_JSONB
+
+
+def get_uuid_type():
+    """Return appropriate UUID type based on dialect."""
+    return PG_UUID(as_uuid=True)
+
+
+class GUID(TypeDecorator):
+    """Platform-independent GUID type.
+
+    Uses PostgreSQL's UUID type when available, otherwise
+    uses CHAR(36) for SQLite and other databases.
+    """
+    impl = CHAR
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        else:
+            return dialect.type_descriptor(CHAR(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if dialect.name == 'postgresql':
+            return value
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        if dialect.name == 'postgresql':
+            return value
+        return UUID(value)
+
+
+class JSONType(TypeDecorator):
+    """Platform-independent JSON type.
+
+    Uses PostgreSQL's JSONB when available, otherwise
+    uses SQLAlchemy's JSON type for SQLite and others.
+    """
+    impl = SA_JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(PG_JSONB)
+        else:
+            return dialect.type_descriptor(SA_JSON)
+
+
 class QueryLog(Base):
     __tablename__ = "query_logs"
 
     id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+        GUID(), primary_key=True, default=uuid4
     )
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
     query_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -47,16 +106,16 @@ class QueryLog(Base):
     escalated_reason: Mapped[str | None] = mapped_column(Text)
     retrieval_k_used: Mapped[int | None] = mapped_column()
     retrieval_steps: Mapped[int | None] = mapped_column()
-    confidence_curve: Mapped[list[float] | None] = mapped_column(JSONB)
-    differential: Mapped[list[dict] | None] = mapped_column(JSONB)
-    evidence: Mapped[list[dict] | None] = mapped_column(JSONB)
+    confidence_curve: Mapped[list[float] | None] = mapped_column(JSONType())
+    differential: Mapped[list[dict] | None] = mapped_column(JSONType())
+    evidence: Mapped[list[dict] | None] = mapped_column(JSONType())
     reasoning: Mapped[str | None] = mapped_column(Text)
     patient_age: Mapped[int | None] = mapped_column()
     patient_gender: Mapped[str | None] = mapped_column(String(50))
-    patient_comorbidities: Mapped[list[str] | None] = mapped_column(JSONB)
-    patient_medications: Mapped[list[str] | None] = mapped_column(JSONB)
-    patient_allergies: Mapped[list[str] | None] = mapped_column(JSONB)
-    vitals: Mapped[dict | None] = mapped_column(JSONB)
+    patient_comorbidities: Mapped[list[str] | None] = mapped_column(JSONType())
+    patient_medications: Mapped[list[str] | None] = mapped_column(JSONType())
+    patient_allergies: Mapped[list[str] | None] = mapped_column(JSONType())
+    vitals: Mapped[dict | None] = mapped_column(JSONType())
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -68,14 +127,14 @@ class EvaluationRun(Base):
     __tablename__ = "evaluation_runs"
 
     id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+        GUID(), primary_key=True, default=uuid4
     )
     method: Mapped[str] = mapped_column(String(50), nullable=False)
     benchmark: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="pending")
     n_samples: Mapped[int] = mapped_column(default=0)
-    config: Mapped[dict | None] = mapped_column(JSONB)
-    results: Mapped[dict | None] = mapped_column(JSONB)
+    config: Mapped[dict | None] = mapped_column(JSONType())
+    results: Mapped[dict | None] = mapped_column(JSONType())
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -89,13 +148,13 @@ class Review(Base):
     __tablename__ = "reviews"
 
     id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+        GUID(), primary_key=True, default=uuid4
     )
     query_log_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("query_logs.id"), nullable=True
+        GUID(), ForeignKey("query_logs.id"), nullable=True
     )
     evaluation_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("evaluation_runs.id"), nullable=True
+        GUID(), ForeignKey("evaluation_runs.id"), nullable=True
     )
     hallucination_flag: Mapped[bool | None] = mapped_column()
     notes: Mapped[str | None] = mapped_column(Text)
@@ -114,8 +173,8 @@ class CorpusStats(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     total_chunks: Mapped[int] = mapped_column(default=0)
     total_documents: Mapped[int] = mapped_column(default=0)
-    specialty_distribution: Mapped[dict] = mapped_column(JSONB, default={})
-    source_distribution: Mapped[dict] = mapped_column(JSONB, default={})
+    specialty_distribution: Mapped[dict] = mapped_column(JSONType(), default={})
+    source_distribution: Mapped[dict] = mapped_column(JSONType(), default={})
     last_updated: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -124,20 +183,33 @@ class CorpusStats(Base):
 async def create_engine_and_session(
     database_url: str | None = None,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
-    """Create async PostgreSQL engine and session maker."""
+    """Create async engine and session maker (PostgreSQL or SQLite)."""
     if database_url is None:
         database_url = os.environ.get(
             "DATABASE_URL",
-            "postgresql+asyncpg://postgres:postgres@localhost:5432/caar_cdss",
+            "sqlite+aiosqlite:///./caar_cdss_dev.db",  # Default to SQLite for dev
         )
 
-    engine = create_async_engine(
-        database_url,
-        echo=os.environ.get("SQL_ECHO", "false").lower() == "true",
-        pool_size=10,
-        max_overflow=20,
-        pool_pre_ping=True,
-    )
+    is_sqlite = database_url.startswith("sqlite")
+
+    # SQLite-specific connect args
+    connect_args = {}
+    if is_sqlite:
+        connect_args = {"check_same_thread": False}
+
+    # Engine config - SQLite doesn't support pooling
+    engine_kwargs = {
+        "echo": os.environ.get("SQL_ECHO", "false").lower() == "true",
+        "connect_args": connect_args,
+    }
+    if not is_sqlite:
+        engine_kwargs.update({
+            "pool_size": 10,
+            "max_overflow": 20,
+            "pool_pre_ping": True,
+        })
+
+    engine = create_async_engine(database_url, **engine_kwargs)
 
     async_session_maker = async_sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False

@@ -15,10 +15,6 @@ def dense_retrieve(
 ) -> list[tuple[EvidenceChunk, float]]:
     """Return (chunk, similarity) pairs for the query."""
     q_emb = embedder.embed([query])[0]
-    # Check if store is ChromaRetriever which accepts query_embedding parameter
-    if store.__class__.__name__ == 'ChromaRetriever':
-        chunks = store.search(query, top_k=top_k, query_embedding=q_emb.tolist())
-        return [(c, c.similarity_score) for c in chunks]
     results = store.search(q_emb, top_k=top_k)
     if results and isinstance(results[0], EvidenceChunk):
         return [(c, c.similarity_score) for c in results]

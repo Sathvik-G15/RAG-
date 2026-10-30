@@ -63,12 +63,16 @@ class HashEmbedder(BaseEmbedder):
 class SentenceTransformerEmbedder(BaseEmbedder):
     """Real sentence-transformers embedder (biomedical model recommended)."""
 
-    def __init__(self, model_name: str = "pritamdeka/S-PubMedBert-MS-MARCO", device: str | None = None):
+    def __init__(self, model_name: str = "pritamdeka/S-PubMedBert-MS-MARCO", device: str | None = "cpu"):
         from sentence_transformers import SentenceTransformer
 
         set_global_seeds(42)
+        device = device or "cpu"
         self._model = SentenceTransformer(model_name, device=device)
-        self._dim = int(self._model.get_sentence_embedding_dimension())
+        if hasattr(self._model, "get_embedding_dimension"):
+            self._dim = int(self._model.get_embedding_dimension())
+        else:
+            self._dim = int(self._model.get_sentence_embedding_dimension())
 
     @property
     def dim(self) -> int:
@@ -82,9 +86,10 @@ class SentenceTransformerEmbedder(BaseEmbedder):
 class BGE_M3Embedder(BaseEmbedder):
     """BGE-M3 (BAAI/bge-m3) hybrid-capable embedder via FlagEmbedding or sentence-transformers."""
 
-    def __init__(self, model_name: str = "BAAI/bge-m3", device: str | None = None, use_fp16: bool = True):
+    def __init__(self, model_name: str = "BAAI/bge-m3", device: str | None = "cpu", use_fp16: bool = False):
         self._dim = 1024
         self._use_flag = False
+        device = device or "cpu"
         try:
             from FlagEmbedding import BGEM3FlagModel
             self._model = BGEM3FlagModel(model_name, use_fp16=use_fp16, device=device)
@@ -107,16 +112,17 @@ class BGE_M3Embedder(BaseEmbedder):
         return vecs.astype(np.float32)
 
 
-def make_embedder(model_name: str | None = None, prefer_real: bool = True) -> BaseEmbedder:
+def make_embedder(model_name: str | None = None, prefer_real: bool = True, device: str | None = "cpu") -> BaseEmbedder:
     """Factory that picks the real embedder if available.
-    
+
     If prefer_real=True and model_name provided, failures will raise.
     """
     if not prefer_real or not model_name:
         return HashEmbedder()
 
     if "bge-m3" in model_name.lower():
-        return BGE_M3Embedder(model_name=model_name)
+        return BGE_M3Embedder(model_name=model_name, device=device)
 
-    return SentenceTransformerEmbedder(model_name=model_name)
+    return SentenceTransformerEmbedder(model_name=model_name, device=device)
+
 

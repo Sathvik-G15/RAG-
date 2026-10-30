@@ -112,7 +112,16 @@ export function PatientPortal() {
                 label="Comorbidities"
                 placeholder="Comma separated (e.g. diabetes, hypertension)"
                 {...register('comorbidities', {
-                  setValueAs: (value: string) => value.split(',').map((s) => s.trim()).filter(Boolean),
+                  setValueAs: (value: unknown) => {
+                    if (Array.isArray(value)) return value;
+                    if (typeof value === 'string') {
+                      return value
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                    }
+                    return [];
+                  },
                 })}
                 error={errors.comorbidities?.message}
                 disabled={isPending}

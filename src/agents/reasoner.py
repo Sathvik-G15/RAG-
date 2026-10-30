@@ -7,6 +7,7 @@ end-to-end testing of the AEB pipeline without GPU/network access.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -44,6 +45,18 @@ class MockReasoner(BaseReasoner):
 
     def generate(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
         query_l = query.lower()
+
+        # Detect benchmark format
+        is_mcq = self._is_mcq_format(query)
+        is_yesno = self._is_yesno_format(query)
+
+        # For MCQ/yes-no benchmarks, try to extract answer from options in query
+        if is_mcq:
+            return self._mock_mcq_response(query, evidence)
+        if is_yesno:
+            return self._mock_yesno_response(query, evidence)
+
+        # Original clinical pattern matching logic for seed queries
         scored: list[DifferentialDiagnosis] = []
 
         pyelo_boost = 1.0
@@ -178,18 +191,230 @@ class MockReasoner(BaseReasoner):
             reasoning="\n".join(reasoning_lines),
         )
 
+    # Benchmark format detection and mock responses
+    def _is_mcq_format(self, query: str) -> bool:
+        """Detect if query is an MCQ format (MedQA, MedMCQA, MMLU-Med)."""
+        return "[Options]" in query or ("A." in query and "B." in query and "C." in query and "D." in query)
+
+    def _is_yesno_format(self, query: str) -> bool:
+        """Detect if query is a yes/no/maybe format (PubMedQA)."""
+        ql = query.lower()
+        return any(kw in ql for kw in ["yes/no", "true/false", "is it", "does it", "can it", "should it"])
+
+    def _mock_mcq_response(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
+        """Handle MCQ format by extracting the correct option from evidence/query overlap."""
+        # Extract options from query
+        options = {}
+        if "[Options]" in query:
+            opt_section = query.split("[Options]")[-1]
+            for line in opt_section.strip().split("\n"):
+                line = line.strip()
+                if line and (line[0].upper() in "ABCD") and len(line) > 2:
+                    key = line[0].upper()
+                    value = line[2:].strip()
+                    options[key] = value
+
+        # If we have options, try to match against evidence
+        best_option = None
+        best_score = 0.0
+
+        for key, value in options.items():
+            score = self._score_option_against_evidence(value, evidence)
+            if score > best_score:
+                best_score = score
+                best_option = key
+
+        if best_option and best_option in options:
+            dx = f"Option {best_option}: {options[best_option]}"
+            confidence = 0.7 + min(0.2, best_score * 0.3)
+            return ClinicalResponse(
+                primary_diagnosis=dx,
+                differential=[DifferentialDiagnosis(diagnosis=dx, probability=confidence, supporting_evidence=[], sources=[], query_signal=True)],
+                confidence=confidence,
+                uncertainty=round(1 - confidence, 4),
+                reasoning=f"Selected option {best_option} based on evidence overlap.",
+            )
+
+        # Fallback: return first option with low confidence
+        if options:
+            first_key = sorted(options.keys())[0]
+            dx = f"Option {first_key}: {options[first_key]}"
+            return ClinicalResponse(
+                primary_diagnosis=dx,
+                differential=[DifferentialDiagnosis(diagnosis=dx, probability=0.3, supporting_evidence=[], sources=[])],
+                confidence=0.3,
+                uncertainty=0.7,
+                reasoning="Defaulting to first option; insufficient evidence for confident selection.",
+                decision=TriageDecision.ESCALATE,
+            )
+
+        # Ultimate fallback
+        return ClinicalResponse(
+            primary_diagnosis=None,
+            differential=[],
+            confidence=0.0,
+            uncertainty=1.0,
+            reasoning="No options found in MCQ query.",
+            decision=TriageDecision.ESCALATE,
+        )
+
+    def _mock_yesno_response(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
+        """Handle yes/no/maybe format (PubMedQA)."""
+        # Simple keyword-based heuristic
+        query_lower = query.lower()
+        evidence_text = " ".join(ch.text.lower() for ch in evidence)
+        combined = query_lower + " " + evidence_text
+
+        # Positive indicators
+        positive_kws = ["effective", "beneficial", "improves", "reduces", "prevents", "treats",
+                        "associated with", "supports", "demonstrates", "confirms", "indicated",
+                        "recommended", "positive", "superior", "better", "significant"]
+        # Negative indicators
+        negative_kws = ["not effective", "no significant", "does not", "no difference",
+                        "fails to", "unlikely", "not recommended", "ineffective",
+                        "no association", "not indicated", "contraindicated"]
+        # Uncertain indicators
+        uncertain_kws = ["uncertain", "unclear", "inconclusive", "requires further",
+                         "mixed results", "potential", "may", "possible", "suggests"]
+
+        pos_count = sum(1 for kw in positive_kws if kw in combined)
+        neg_count = sum(1 for kw in negative_kws if kw in combined)
+        unc_count = sum(1 for kw in uncertain_kws if kw in combined)
+
+        if pos_count > neg_count and pos_count > unc_count:
+            answer = "yes"
+            confidence = min(0.9, 0.6 + pos_count * 0.05)
+        elif neg_count > pos_count and neg_count > unc_count:
+            answer = "no"
+            confidence = min(0.9, 0.6 + neg_count * 0.05)
+        else:
+            answer = "maybe"
+            confidence = 0.5 + unc_count * 0.05
+
+        return ClinicalResponse(
+            primary_diagnosis=answer,
+            differential=[DifferentialDiagnosis(diagnosis=answer, probability=confidence, supporting_evidence=[], sources=[])],
+            confidence=confidence,
+            uncertainty=round(1 - confidence, 4),
+            reasoning=f"Answer: {answer} based on keyword analysis of evidence.",
+        )
+
+    def _score_option_against_evidence(self, option_text: str, evidence: Sequence[EvidenceChunk]) -> float:
+        """Score an MCQ option against retrieved evidence using token overlap."""
+        from src.retrieval.sparse import tokenize
+
+        option_tokens = set(tokenize(option_text))
+        if not option_tokens:
+            return 0.0
+
+        total_overlap = 0
+        total_evidence_tokens = 0
+
+        for ch in evidence:
+            ch_tokens = set(tokenize(ch.text))
+            overlap = len(option_tokens & ch_tokens)
+            total_overlap += overlap
+            total_evidence_tokens += len(ch_tokens)
+
+        if total_evidence_tokens == 0:
+            return 0.0
+
+        return total_overlap / max(len(option_tokens), 1)
+
+
+def _sanitize_parsed_dict(d: dict, raw_text: str) -> dict:
+    diag = d.get("primary_diagnosis")
+    if diag is not None:
+        diag = str(diag).strip() or None
+
+    conf = d.get("confidence")
+    try:
+        conf_val = float(conf) if conf is not None else 0.50
+        conf_val = max(0.0, min(1.0, conf_val))
+    except (ValueError, TypeError):
+        conf_val = 0.50
+
+    unc = d.get("uncertainty")
+    try:
+        unc_val = float(unc) if unc is not None else round(1.0 - conf_val, 4)
+        unc_val = max(0.0, min(1.0, unc_val))
+    except (ValueError, TypeError):
+        unc_val = round(1.0 - conf_val, 4)
+
+    raw_diff = d.get("differential", [])
+    diff_list = []
+    if isinstance(raw_diff, list):
+        for item in raw_diff:
+            if isinstance(item, dict):
+                dx_name = str(item.get("diagnosis", item.get("name", "unspecified_condition")) or "unspecified_condition")
+                try:
+                    prob = float(item.get("probability", item.get("prob", conf_val)))
+                    prob = max(0.0, min(1.0, prob))
+                except (ValueError, TypeError):
+                    prob = conf_val
+
+                supp = item.get("supporting_evidence", [])
+                if isinstance(supp, str):
+                    supp = [supp.strip()] if supp.strip() else []
+                elif isinstance(supp, (list, tuple, set)):
+                    supp = [str(x).strip() for x in supp if x is not None and str(x).strip()]
+                else:
+                    supp = []
+
+                srcs = item.get("sources", [])
+                if isinstance(srcs, str):
+                    srcs = [srcs.strip()] if srcs.strip() else []
+                elif isinstance(srcs, (list, tuple, set)):
+                    srcs = [str(x).strip() for x in srcs if x is not None and str(x).strip()]
+                else:
+                    srcs = []
+
+                diff_list.append({
+                    "diagnosis": dx_name,
+                    "probability": prob,
+                    "supporting_evidence": supp,
+                    "sources": srcs,
+                    "query_signal": bool(item.get("query_signal", False)),
+                })
+            elif isinstance(item, str) and item.strip():
+                diff_list.append({
+                    "diagnosis": item.strip(),
+                    "probability": conf_val,
+                    "supporting_evidence": [],
+                    "sources": [],
+                    "query_signal": False,
+                })
+    elif isinstance(raw_diff, dict):
+        diff_list.append(raw_diff)
+
+    reasoning = d.get("reasoning")
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        reasoning = raw_text[:600].strip()
+
+    return {
+        "primary_diagnosis": diag,
+        "confidence": conf_val,
+        "uncertainty": unc_val,
+        "differential": diff_list,
+        "reasoning": reasoning,
+    }
+
 
 def _parse_llm_json(text: str) -> dict:
     """Robust 3-tier JSON parser for open-source LLM outputs."""
     try:
-        return json.loads(text.strip())
+        parsed = json.loads(text.strip())
+        if isinstance(parsed, dict):
+            return _sanitize_parsed_dict(parsed, text)
     except json.JSONDecodeError:
         pass
 
     match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group())
+            parsed = json.loads(match.group())
+            if isinstance(parsed, dict):
+                return _sanitize_parsed_dict(parsed, text)
         except json.JSONDecodeError:
             pass
 
@@ -267,6 +492,16 @@ class OpenSourceLLMReasoner(BaseReasoner):
         if tok.pad_token_id is None and tok.eos_token_id is not None:
             tok.pad_token_id = tok.eos_token_id
 
+        max_memory = None
+        if torch.cuda.is_available():
+            n_gpus = torch.cuda.device_count()
+            if n_gpus > 1:
+                # Multi-GPU (e.g. Kaggle 2xT4)
+                max_memory = {0: "9GiB", 1: "7GiB", "cpu": "18GiB"}
+            else:
+                # Single GPU (e.g. RTX 4050 6 GB): cap at 4.5 GiB, leaves 1.5 GiB for activations/KV cache
+                max_memory = {0: "4.5GiB", "cpu": "18GiB"}
+
         if self.load_in_4bit and torch.cuda.is_available():
             quant_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -277,8 +512,9 @@ class OpenSourceLLMReasoner(BaseReasoner):
             model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 device_map="auto",
+                max_memory=max_memory,
                 quantization_config=quant_config,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+                dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
                 low_cpu_mem_usage=True,
             )
             self._pipe = pipeline(
@@ -290,20 +526,15 @@ class OpenSourceLLMReasoner(BaseReasoner):
             _strip_bad_pipe_kwargs(self._pipe)
             return
 
-        # fp16/cpu path (FIX: max_memory goes to from_pretrained, NOT pipeline)
+        # fp16/cpu path
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         device_map = "auto" if torch.cuda.is_available() else None
 
-        max_memory = None
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            # your original intent preserved:
-            max_memory = {0: "9GiB", 1: "7GiB"}
-
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map=device_map,
-            max_memory=max_memory,          # OK HERE
+            max_memory=max_memory,
             low_cpu_mem_usage=True,
         )
         self._pipe = pipeline(
@@ -315,11 +546,13 @@ class OpenSourceLLMReasoner(BaseReasoner):
         _strip_bad_pipe_kwargs(self._pipe)
 
     def generate(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
+        import torch
+
         if self._pipe is None:
             self._load()
 
         evidence_block = "\n\n".join(
-            f"[{i+1}] SOURCE={c.source}; TITLE={c.title or ''}:\n{c.text}"
+            f"[{i+1}] SOURCE={c.source}; TITLE={c.title or ''}:\n{c.text[:500]}"
             for i, c in enumerate(evidence)
         )
         prompt = (
@@ -330,7 +563,6 @@ class OpenSourceLLMReasoner(BaseReasoner):
             "differential (list of objects with diagnosis, probability, supporting_evidence, sources), reasoning (string)."
         )
 
-        # Note: don't pass generation_config explicitly; just pass generation args.
         outputs = self._pipe(
             prompt,
             max_new_tokens=self.max_new_tokens,
@@ -339,6 +571,9 @@ class OpenSourceLLMReasoner(BaseReasoner):
             top_p=self.top_p,
             return_full_text=False,
         )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         text = outputs[0]["generated_text"]
         payload = _parse_llm_json(text)
         return ClinicalResponse(**payload)

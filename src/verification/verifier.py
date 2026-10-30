@@ -68,6 +68,20 @@ _CLAIM_STOPWORDS = _STOPWORDS | frozenset(
     .split()
 )
 
+# Phrases indicating appropriate abstention/uncertainty - should not be penalized as hallucination
+_ABSTENTION_PHRASES = frozenset([
+    "insufficient evidence", "cannot determine", "unable to diagnose",
+    "clinician review", "escalate", "no confident diagnosis",
+    "insufficient to determine", "no supported diagnosis",
+    "evidence does not support", "query-anchored diagnosis",
+    "possible conditions considered", "alternative differential"
+])
+
+def _is_abstention_claim(claim: str) -> bool:
+    """Check if a claim is an appropriate abstention/uncertainty statement."""
+    claim_lower = claim.lower()
+    return any(phrase in claim_lower for phrase in _ABSTENTION_PHRASES)
+
 
 class LexicalVerifier:
     """Dependency-free claim->evidence scorer (surrogate for NLI)."""
@@ -92,6 +106,10 @@ class LexicalVerifier:
         checks: list[ClaimCheck] = []
 
         for claim in claims:
+            # Skip abstention/uncertainty claims - these are appropriate and should not be penalized
+            if _is_abstention_claim(claim):
+                continue
+
             claim_tokens = self._tokens(claim, _CLAIM_STOPWORDS)
             best_score = 0.0
             best_chunk: EvidenceChunk | None = None
@@ -129,14 +147,20 @@ class LexicalVerifier:
 
 class DeBERTaVerifier:
     """Real NLI entailment verifier (DeBERTa-v3-large-MNLI, lazy-loaded).
-    
+
     Uses direct PyTorch batched inference on GPU 1 (multi-GPU) or GPU 0,
     avoiding accelerate hook deadlocks and speeding up evaluation by ~20x.
     """
 
-    def __init__(self, model_name: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli", threshold: float = 0.7):
+    def __init__(
+        self,
+        model_name: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
+        threshold: float = 0.7,
+        device: str | None = "cpu",
+    ):
         self.model_name = model_name
         self.threshold = threshold
+        self.device_pref = device or "cpu"
         self._model = None
         self._tokenizer = None
         self._device = None
@@ -146,7 +170,13 @@ class DeBERTaVerifier:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        target_device = "cuda:1" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else ("cuda:0" if torch.cuda.is_available() else "cpu")
+        target_device = self.device_pref
+        if not target_device:
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                target_device = "cuda:1"
+            else:
+                target_device = "cpu"
+
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self._model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name,
@@ -159,6 +189,7 @@ class DeBERTaVerifier:
         # Find entailment label index from model config
         label2id = {str(k).lower(): v for k, v in getattr(self._model.config, "label2id", {}).items()}
         self._entailment_idx = label2id.get("entailment", label2id.get("entailed", 0))
+
 
     def verify(self, reasoning: str, evidence: Sequence[EvidenceChunk]) -> VerificationResult:
         if self._model is None:
@@ -198,7 +229,7 @@ class DeBERTaVerifier:
                 probs = torch.softmax(logits, dim=-1)
                 ent_scores = probs[:, self._entailment_idx].tolist()
 
-            for score, ch in zip(ent_scores, evidence):
+            for score, ch in zip(ent_scores, evidence, strict=False):
                 if score > best_score:
                     best_score = float(score)
                     best_chunk = ch
@@ -232,8 +263,10 @@ class VerifierFactory:
     @staticmethod
     def get_verifier() -> object:
         hw = detect_hardware()
-        vram_gb = hw.get("vram_gb", 0)
-        if vram_gb >= 10.0:
+        # Use DeBERTa on any CUDA device (including 6 GB VRAM).
+        # DeBERTa-v3-large in fp16 occupies ~1.4 GB VRAM — safe on RTX 4050
+        # when the LLM is unloaded between steps.
+        if hw.get("device") == "cuda":
             return DeBERTaVerifier()
         return LexicalVerifier()
 

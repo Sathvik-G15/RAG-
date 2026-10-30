@@ -49,3 +49,29 @@ def test_chunk_document():
 def test_make_reasoner_factory():
     r_mock = make_reasoner(backend="mock")
     assert r_mock.__class__.__name__ == "MockReasoner"
+
+
+def test_clinical_response_with_string_evidence():
+    from src.models import ClinicalResponse, DifferentialDiagnosis
+
+    # LLM returning supporting_evidence as a string instead of a list
+    raw_payload = {
+        "primary_diagnosis": "cholecystitis",
+        "confidence": 0.85,
+        "differential": [
+            {
+                "diagnosis": "acute cholecystitis",
+                "probability": 0.85,
+                "supporting_evidence": "The attending surgeon noted inflammation.",
+                "sources": "Operative report",
+            }
+        ],
+        "reasoning": "Clinical picture aligns with acute cholecystitis.",
+    }
+    parsed = _parse_llm_json(str(raw_payload).replace("'", '"'))
+    resp = ClinicalResponse(**parsed)
+    assert resp.primary_diagnosis == "cholecystitis"
+    assert isinstance(resp.differential[0].supporting_evidence, list)
+    assert resp.differential[0].supporting_evidence == ["The attending surgeon noted inflammation."]
+    assert resp.differential[0].sources == ["Operative report"]
+
