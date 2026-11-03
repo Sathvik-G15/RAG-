@@ -2,6 +2,7 @@
 # ==============================================================================
 # CAAR-CDSS: Kaggle T4 Benchmark Runner Script
 # Runs all 7 clinical benchmarks with 8B model in fp16 on Kaggle T4 GPU
+# Automatically detects offline uploaded model & datasets if attached
 # ==============================================================================
 
 set -e
@@ -26,8 +27,33 @@ pip install -q \
     scipy \
     FlagEmbedding
 
-echo "=== 3. Downloading Datasets ==="
-python scripts/download_datasets.py
+echo "=== 3. Detecting Local Datasets & Models ==="
+mkdir -p data/external
+
+# Check if datasets were attached via Kaggle Datasets
+DATA_INPUT=$(find /kaggle/input -name "pubmedqa.jsonl" 2>/dev/null | head -n 1)
+if [ -n "$DATA_INPUT" ]; then
+    DATA_DIR=$(dirname "$DATA_INPUT")
+    echo "Found offline datasets at: $DATA_DIR"
+    cp "$DATA_DIR"/*.jsonl data/external/ 2>/dev/null || true
+    echo "Copied datasets into data/external/"
+else
+    echo "No offline datasets found in /kaggle/input. Downloading datasets..."
+    python scripts/download_datasets.py
+fi
+
+# Check if model was attached via Kaggle Datasets
+MODEL_INDEX=$(find /kaggle/input -name "model.safetensors.index.json" 2>/dev/null | head -n 1)
+if [ -n "$MODEL_INDEX" ]; then
+    MODEL_DIR=$(dirname "$MODEL_INDEX")
+    echo "Found offline model at: $MODEL_DIR"
+    sed -i "s|model_name:.*|model_name: \"$MODEL_DIR\"|g" configs/seeds.yaml
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    echo "Configured configs/seeds.yaml to load model from: $MODEL_DIR"
+else
+    echo "No offline model found in /kaggle/input. Model will download from Hugging Face if needed."
+fi
 
 echo "=== 4. Running Benchmark Suite on Kaggle GPU ==="
 python -m src.experiments.runner \
@@ -41,6 +67,6 @@ python -m src.experiments.runner \
     --output experiments/results/kaggle_eval
 
 echo "=== 5. Packaging Results ==="
-tar -czvf kaggle_eval_results.tar.gz -C experiments/results kaggle_eval
+tar -czvf /kaggle/working/kaggle_eval_results.tar.gz -C experiments/results kaggle_eval
 
 echo "=== Done! Download kaggle_eval_results.tar.gz from /kaggle/working ==="
