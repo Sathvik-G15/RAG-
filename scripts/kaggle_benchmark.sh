@@ -47,10 +47,20 @@ MODEL_INDEX=$(find /kaggle/input -name "model.safetensors.index.json" 2>/dev/nul
 if [ -n "$MODEL_INDEX" ]; then
     MODEL_DIR=$(dirname "$MODEL_INDEX")
     echo "Found offline model at: $MODEL_DIR"
-    sed -i "s|model_name:.*|model_name: \"$MODEL_DIR\"|g" configs/seeds.yaml
-    export HF_HUB_OFFLINE=1
-    export TRANSFORMERS_OFFLINE=1
-    echo "Configured configs/seeds.yaml to load model from: $MODEL_DIR"
+    
+    # Safely update ONLY the LLM model_name (DO NOT overwrite embedding model_name)
+    python -c "
+import yaml
+from pathlib import Path
+p = Path('configs/seeds.yaml')
+d = yaml.safe_load(p.read_text())
+d['llm']['model_name'] = '$MODEL_DIR'
+if 'ragas_judge' in d:
+    d['ragas_judge']['model_name'] = '$MODEL_DIR'
+p.write_text(yaml.dump(d, sort_keys=False))
+print('Successfully configured llm.model_name ->', d['llm']['model_name'])
+print('Preserved embedding.model_name ->', d['embedding']['model_name'])
+"
 else
     echo "No offline model found in /kaggle/input. Model will download from Hugging Face if needed."
 fi
