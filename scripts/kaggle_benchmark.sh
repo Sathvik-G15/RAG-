@@ -7,6 +7,10 @@
 
 set -e
 
+# Default N=200 to guarantee finishing in ~4-5 hours (well within Kaggle's 12h limit).
+# Can be overridden by passing an argument: bash scripts/kaggle_benchmark.sh 300
+N_SAMPLES=${1:-200}
+
 echo "=== 1. Checking GPU Environment ==="
 nvidia-smi
 
@@ -65,11 +69,11 @@ else
     echo "No offline model found in /kaggle/input. Model will download from Hugging Face if needed."
 fi
 
-echo "=== 4. Running Benchmark Suite on Kaggle GPU ==="
+echo "=== 4. Running Benchmark Suite on Kaggle GPU (N=$N_SAMPLES per dataset) ==="
 python -m src.experiments.runner \
     --mode kaggle_fp16 \
     --benchmarks seeds medqa pubmedqa mmlumed ddxplus medmcqa mtsamples \
-    --n 500 \
+    --n $N_SAMPLES \
     --compute-matched \
     --per-round \
     --verification-ablation \
