@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..config import TriageConfig
 from ..models import ClinicalResponse, PatientProfile, RiskLevel, TriageDecision, Vitals
 
 
@@ -43,8 +44,13 @@ def assign_risk(
     profile: PatientProfile | None = None,
     vitals: Vitals | None = None,
     query: str = "",
+    triage_config: TriageConfig | None = None,
 ) -> ClinicalResponse:
     """Overlay risk level and decision on a response based on safety rules."""
+    if triage_config is None:
+        from ..config import get_app_config
+        triage_config = get_app_config().triage
+
     emergency_reason = _check_emergency(vitals, profile, query)
     if emergency_reason:
         response.risk_level = RiskLevel.EMERGENCY
@@ -52,14 +58,14 @@ def assign_risk(
         response.escalated_reason = emergency_reason + " — immediate clinician review required."
         return response
 
-    if response.confidence < 0.7:
+    if response.confidence < triage_config.urgent_confidence:
         response.risk_level = RiskLevel.URGENT
         response.decision = TriageDecision.ESCALATE
         if not response.escalated_reason:
             response.escalated_reason = "Low confidence requires clinician review."
         return response
 
-    if response.confidence < 0.85:
+    if response.confidence < triage_config.routine_confidence:
         response.risk_level = RiskLevel.ROUTINE
         response.decision = TriageDecision.ASK_FOLLOWUP
         return response

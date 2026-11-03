@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from ..agents.context_builder import infer_profile
 from ..confidence.aeb import AEBResult
@@ -18,6 +20,7 @@ from ..confidence.pipeline import Pipeline
 from ..data.benchmarks import build_query_prompt, get_benchmark
 from ..models import ClinicalResponse, TriageDecision
 from ..utils.disk_utils import cleanup_after_step, cleanup_gpu_memory, format_progress, safe_save
+from .per_round_analysis import run_compute_matched_evaluation, run_per_round_analysis
 
 
 @dataclass
@@ -59,6 +62,7 @@ def _dx_matches(
     options: dict[str, str] | None = None,
     correct_option: str | None = None,
     full_response: ClinicalResponse | None = None,
+    strict_mode: bool = False,
 ) -> bool:
     """Robust clinical diagnosis and benchmark answer matching.
 
@@ -66,6 +70,15 @@ def _dx_matches(
     Abstentions (pred=None) are always wrong — checking the differential
     when no primary diagnosis was produced would inflate accuracy by
     crediting answers the model never committed to.
+    
+    Args:
+        pred: Predicted diagnosis
+        expected: Expected/ground truth diagnosis
+        options: Multiple choice options (for MedQA/MedMCQA)
+        correct_option: Correct option letter (A/B/C/D)
+        full_response: Full clinical response (for differential checking)
+        strict_mode: If True, only exact string match or option-letter match.
+                     If False (default), allows substring, Jaccard, and fuzzy matching.
     """
     # Global rule: abstentions are never correct regardless of differential.
     if not pred:
@@ -77,10 +90,22 @@ def _dx_matches(
     if not exp_str:
         return False
 
-    # 1. Exact string match
+    # 1. Exact string match (always allowed)
     if pred_str == exp_str:
         return True
 
+    # In strict mode, only exact match or option-letter match is allowed
+    if strict_mode:
+        # 2. Multiple Choice Option matching (MedQA / MedMCQA) - exact option text or letter
+        if options and correct_option:
+            opt_text = options.get(correct_option, "").strip().lower()
+            if opt_text and opt_text == pred_str:
+                return True
+            if pred_str == f"option {correct_option.lower()}" or pred_str == f"({correct_option.lower()})" or pred_str == correct_option.lower():
+                return True
+        return False
+
+    # Lenient mode: additional matching strategies
     # 2. Substring containment
     if len(exp_str) > 3 and (exp_str in pred_str or pred_str in exp_str):
         return True
@@ -148,7 +173,8 @@ def run_hybrid(pipeline: Pipeline, query: str) -> tuple[ClinicalResponse, int, f
     return response, len(evidence), latency
 
 
-def run_aeb(pipeline: Pipeline, query: str, confidence_threshold: float = 0.70) -> tuple[AEBResult, float]:
+def run_aeb(pipeline: Pipeline, query: str) -> tuple[AEBResult, float]:
+    """Run AEB using the pipeline's configured threshold (from seeds.yaml)."""
     t0 = time.perf_counter()
     patient = infer_profile(query)
     result = pipeline.aeb.run(query, patient=patient, max_k_override=15)
@@ -160,8 +186,8 @@ def evaluate(
     pipeline: Pipeline,
     queries: Sequence[dict],
     method: str = "aeb",
-    confidence_threshold: float = 0.70,
     gc_after_each: bool = False,
+    strict_mode: bool = False,
 ) -> ExperimentReport:
     results: list[QueryResult] = []
     t_start = time.perf_counter()
@@ -181,7 +207,7 @@ def evaluate(
                 query=query,
                 expected_dx=expected,
                 predicted_dx=resp.primary_diagnosis,
-                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp),
+                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp, strict_mode=strict_mode),
                 confidence=resp.confidence,
                 hallucination_score=0.0,
                 latency_ms=latency,
@@ -195,7 +221,7 @@ def evaluate(
                 query=query,
                 expected_dx=expected,
                 predicted_dx=resp.primary_diagnosis,
-                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp),
+                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp, strict_mode=strict_mode),
                 confidence=resp.confidence,
                 hallucination_score=0.0,
                 latency_ms=latency,
@@ -204,13 +230,13 @@ def evaluate(
                 budget_exhausted=False,
             )
         else:
-            aeb, latency = run_aeb(pipeline, query, confidence_threshold)
+            aeb, latency = run_aeb(pipeline, query)
             resp = aeb.response
             result = QueryResult(
                 query=query,
                 expected_dx=expected,
                 predicted_dx=resp.primary_diagnosis,
-                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp),
+                correct=_dx_matches(resp.primary_diagnosis, expected, options=options, correct_option=correct_opt, full_response=resp, strict_mode=strict_mode),
                 confidence=resp.confidence,
                 hallucination_score=resp.hallucination_score,
                 latency_ms=latency,
@@ -255,18 +281,24 @@ def run_threshold_sweep(
 ) -> list[ExperimentReport]:
     """Run evaluation across multiple confidence thresholds to generate abstention curve."""
     if thresholds is None:
+        # Default sweep range; can be overridden via CLI --thresholds
         thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
 
     reports = []
+    original_threshold = pipeline.aeb.config.confidence_threshold
     for threshold in thresholds:
         print(f"Running evaluation at threshold={threshold:.2f}...")
-        report = evaluate(pipeline, queries, method="aeb", confidence_threshold=threshold)
+        # Temporarily override the pipeline's AEB threshold
+        pipeline.aeb.config.confidence_threshold = threshold
+        report = evaluate(pipeline, queries, method="aeb", gc_after_each=False)
         reports.append(report)
         if out_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / f"report_aeb_threshold_{threshold:.2f}.json").write_text(
                 json.dumps(asdict(report), indent=2, default=str)
             )
+    # Restore original threshold
+    pipeline.aeb.config.confidence_threshold = original_threshold
 
     if out_dir:
         # Save sweep summary
@@ -288,12 +320,152 @@ def run_threshold_sweep(
     return reports
 
 
+def run_verification_ablation(
+    pipeline: Pipeline,
+    queries: Sequence[dict],
+    out_dir: Path | None = None,
+    gc_after_each: bool = False,
+    prefer_real: bool = False,
+) -> dict[str, Any]:
+    """Run verification ablation: Lexical vs DeBERTa vs None × cap=0.5 vs cap=1.0.
+    
+    This tests whether the 0.5 hallucination penalty cap is still needed with DeBERTa
+    (which should have better entailment detection than the lexical verifier).
+    
+    Args:
+        prefer_real: If False (mock mode), skip DeBERTa as it requires GPU/model download.
+    
+    Returns:
+        Dictionary with results for each configuration.
+    """
+    from ..confidence.estimation import ConfidenceModel
+    from ..verification.verifier import LexicalVerifier, DeBERTaVerifier, make_verifier
+    
+    print("\n=== Running verification ablation ===")
+    
+    # Configurations to test
+    configs = [
+        {"verifier": "lexical", "cap": 0.5, "name": "lexical_cap0.5"},
+        {"verifier": "lexical", "cap": 1.0, "name": "lexical_cap1.0"},
+    ]
+    
+    # Only add DeBERTa configs if prefer_real (not mock mode)
+    if prefer_real:
+        configs.extend([
+            {"verifier": "deberta", "cap": 0.5, "name": "deberta_cap0.5"},
+            {"verifier": "deberta", "cap": 1.0, "name": "deberta_cap1.0"},
+        ])
+    
+    configs.append({"verifier": "none", "cap": 0.0, "name": "none"})  # No verification = no hallucination penalty
+    
+    results = {}
+    
+    for cfg in configs:
+        verifier_type = cfg["verifier"]
+        cap = cfg["cap"]
+        name = cfg["name"]
+        
+        print(f"  Running {name}...")
+        
+        # Create verifier
+        if verifier_type == "lexical":
+            verifier = LexicalVerifier()
+        elif verifier_type == "deberta":
+            try:
+                verifier = DeBERTaVerifier()
+            except Exception as e:
+                print(f"    ⚠️  DeBERTa not available: {e}. Skipping {name}.")
+                continue
+        elif verifier_type == "none":
+            # Create a dummy verifier that returns no hallucination
+            from ..verification.verifier import VerificationResult
+            class NoOpVerifier:
+                def verify(self, reasoning, evidence):
+                    return VerificationResult(total_claims=0, supported_claims=0, hallucination_score=0.0, checks=[])
+            verifier = NoOpVerifier()
+        else:
+            continue
+        
+        # Create confidence model with custom cap
+        # We need to patch the cap - easiest is to create a custom ConfidenceModel
+        class CappedConfidenceModel(ConfidenceModel):
+            def score(self, signals):
+                # Override the cap
+                capped_hallucination = min(signals.hallucination_penalty, cap)
+                weights = np.array(
+                    [self.w_retriever, self.w_evidence, self.w_agreement, self.w_llm, self.w_hallucination],
+                    dtype=np.float64,
+                )
+                values = np.array(
+                    [
+                        signals.retriever_top1,
+                        signals.evidence_sufficiency,
+                        signals.support_agreement,
+                        signals.raw_confidence,
+                        1.0 - capped_hallucination,
+                    ],
+                    dtype=np.float64,
+                )
+                raw = float((weights * values).sum() / weights.sum())
+                if self.temperature != 1.0:
+                    z = raw / self.temperature
+                    raw = float(_softmax([z, 0.0])[0])
+                return float(np.clip(raw, 0.0, 1.0))
+        
+        # Save original verifier and confidence model
+        original_verifier = pipeline.aeb.verifier
+        original_confidence_model = pipeline.aeb.confidence_model
+        
+        # Replace with test config
+        pipeline.aeb.verifier = verifier
+        pipeline.aeb.confidence_model = CappedConfidenceModel()
+        
+        try:
+            # Run evaluation
+            report = evaluate(pipeline, queries, method="aeb", gc_after_each=gc_after_each)
+            results[name] = {
+                "verifier": verifier_type,
+                "cap": cap,
+                "accuracy": report.accuracy,
+                "avg_confidence": report.avg_confidence,
+                "avg_hallucination": report.avg_hallucination,
+                "avg_latency_ms": report.avg_latency_ms,
+                "avg_retrieval_k": report.avg_retrieval_k,
+                "avg_steps": report.avg_steps,
+                "budget_exhausted_rate": report.budget_exhausted_rate,
+                "abstention_rate": report.abstention_rate,
+            }
+            print(f"    {name}: Acc={report.accuracy:.3f}, Halluc={report.avg_hallucination:.3f}, K={report.avg_retrieval_k:.1f}")
+        finally:
+            # Restore
+            pipeline.aeb.verifier = original_verifier
+            pipeline.aeb.confidence_model = original_confidence_model
+    
+    # Save results
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_save(
+            json.dumps(results, indent=2, default=str),
+            out_dir / "verification_ablation.json",
+        )
+    
+    return results
+
+
+# Need numpy and _softmax for the custom ConfidenceModel
+import numpy as np
+from ..confidence.estimation import _softmax
+
+
 def run_all(
     pipeline: Pipeline,
     queries: Sequence[dict],
     out_dir: Path,
     benchmarks: list[str] = None,
     thresholds: list[float] = None,
+    run_compute_matched: bool = False,
+    run_per_round: bool = False,
+    run_verification_ablation: bool = False,
 ) -> dict[str, Any]:
     """Run all evaluations and save results."""
     out_dir = Path(out_dir)
@@ -327,7 +499,52 @@ def run_all(
             cleanup_after_step(f"{bench_name}-{method}")
         all_results[bench_name] = bench_results
 
-    # 2. Run threshold sweep on AEB
+    # 2. Run compute-matched baselines (AEB vs fixed-k matched to AEB's avg K)
+    if run_compute_matched:
+        print("\n=== Running compute-matched evaluation ===")
+        for bench_name in benchmarks:
+            if bench_name == "seeds":
+                from ..data.seed_corpus import get_seed_queries
+                bench_queries = get_seed_queries()
+            else:
+                bench_queries = get_benchmark(bench_name)
+            
+            comparison = run_compute_matched_evaluation(
+                pipeline, bench_queries, bench_name, out_dir
+            )
+            all_results[f"{bench_name}_compute_matched"] = comparison
+
+    # 3. Run per-round analysis
+    if run_per_round:
+        print("\n=== Running per-round analysis ===")
+        for bench_name in benchmarks:
+            if bench_name == "seeds":
+                from ..data.seed_corpus import get_seed_queries
+                bench_queries = get_seed_queries()
+            else:
+                bench_queries = get_benchmark(bench_name)
+            
+            per_round_report = run_per_round_analysis(
+                pipeline, bench_queries, bench_name, out_dir
+            )
+            all_results[f"{bench_name}_per_round"] = asdict(per_round_report)
+
+    # 4. Run verification ablation
+    if run_verification_ablation:
+        print("\n=== Running verification ablation ===")
+        if benchmarks == ["seeds"] or "seeds" in benchmarks:
+            from ..data.seed_corpus import get_seed_queries
+            bench_queries = get_seed_queries()
+        else:
+            # Use first benchmark
+            bench_queries = get_benchmark(benchmarks[0])
+        
+        ablation_results = run_verification_ablation(
+            pipeline, bench_queries, out_dir
+        )
+        all_results["verification_ablation"] = ablation_results
+
+    # 5. Run threshold sweep on AEB
     if thresholds:
         print("\n=== Running threshold sweep on seeds ===")
         from ..data.seed_corpus import get_seed_queries
@@ -362,13 +579,17 @@ def main():
                         choices=["mock", "real", "local_4bit", "kaggle_fp16", "hf_api"],
                         help="LLM inference backend mode")
     parser.add_argument("--benchmarks", nargs="+", default=["seeds"],
-                        choices=["medqa", "pubmedqa", "mmlumed", "ddxplus", "seeds"],
+                        choices=["medqa", "pubmedqa", "mmlumed", "ddxplus", "seeds", "medmcqa", "mtsamples"],
                         help="Benchmarks to run")
     parser.add_argument("--n", type=int, default=500, help="Number of queries per benchmark")
     parser.add_argument("--output", "--output-dir", dest="output", type=str, default="experiments/results", help="Output directory")
     parser.add_argument("--chroma-dir", type=str, default=None, help="Path to pre-ingested ChromaDB directory")
     parser.add_argument("--threshold-sweep", action="store_true", help="Run threshold sweep for abstention curve")
     parser.add_argument("--embedding-ablation", action="store_true", help="Run embedding model ablation")
+    parser.add_argument("--compute-matched", action="store_true", help="Run compute-matched baselines (AEB vs fixed-k matched to AEB's avg K)")
+    parser.add_argument("--per-round", action="store_true", help="Run per-round confidence vs accuracy analysis")
+    parser.add_argument("--verification-ablation", action="store_true", help="Run verification ablation (lexical/deberta/none × cap=0.5/1.0)")
+    parser.add_argument("--strict-match", action="store_true", help="Use strict matching (exact string or option-letter only) instead of lenient fuzzy matching")
     parser.add_argument("--thresholds", nargs="+", type=float,
                         default=[0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95],
                         help="Confidence thresholds for sweep")
@@ -426,7 +647,7 @@ def main():
                 except Exception as e:
                     print(f"⚠️  Could not load existing {report_path.name}: {e}. Re-running...", flush=True)
 
-            report = evaluate(pipeline, queries, method=method, gc_after_each=args.gc_after_each)
+            report = evaluate(pipeline, queries, method=method, gc_after_each=args.gc_after_each, strict_mode=args.strict_match)
             bench_results[method] = report
             # Safe-save individual report
             try:
@@ -453,6 +674,37 @@ def main():
         print(f"⚠️  Could not save combined results: {e}", flush=True)
         print(json.dumps(all_results, indent=2, default=str), flush=True)
 
+    # Run compute-matched baselines if requested
+    if args.compute_matched:
+        print("\n=== Running compute-matched baselines ===", flush=True)
+        for bench_name, queries in all_queries.items():
+            comparison = run_compute_matched_evaluation(
+                pipeline, queries, bench_name, Path(args.output), gc_after_each=args.gc_after_each
+            )
+            all_results[f"{bench_name}_compute_matched"] = comparison
+
+    # Run per-round analysis if requested
+    if args.per_round:
+        print("\n=== Running per-round analysis ===", flush=True)
+        for bench_name, queries in all_queries.items():
+            per_round_report = run_per_round_analysis(
+                pipeline, queries, bench_name, Path(args.output), gc_after_each=args.gc_after_each
+            )
+            all_results[f"{bench_name}_per_round"] = asdict(per_round_report)
+
+    # Run verification ablation if requested
+    if args.verification_ablation:
+        print("\n=== Running verification ablation ===", flush=True)
+        if "seeds" in all_queries:
+            queries = all_queries["seeds"]
+        else:
+            # Use first benchmark
+            queries = list(all_queries.values())[0]
+        ablation_results = run_verification_ablation(
+            pipeline, queries, Path(args.output), gc_after_each=args.gc_after_each, prefer_real=(args.mode != "mock")
+        )
+        all_results["verification_ablation"] = ablation_results
+
     # Run threshold sweep if requested
     if args.threshold_sweep:
         from ..data.seed_corpus import get_seed_queries
@@ -462,8 +714,24 @@ def main():
     print("\n=== Summary ===", flush=True)
     for bench_name, bench_results in all_results.items():
         print(f"\n{bench_name.upper()}:", flush=True)
-        for method, report in bench_results.items():
-            print(f"  {method}: Acc={report.accuracy:.2f}, Abstain={report.abstention_rate:.2f}, Halluc={report.avg_hallucination:.2f}, AvgK={report.avg_retrieval_k:.1f}", flush=True)
+        if isinstance(bench_results, dict):
+            # Check if it's ExperimentReport objects or compute_matched/per_round dicts
+            for method, report in bench_results.items():
+                if hasattr(report, 'accuracy'):
+                    # ExperimentReport
+                    print(f"  {method}: Acc={report.accuracy:.2f}, Abstain={report.abstention_rate:.2f}, Halluc={report.avg_hallucination:.2f}, AvgK={report.avg_retrieval_k:.1f}", flush=True)
+                elif isinstance(report, dict):
+                    # compute_matched or per_round dict
+                    if 'accuracy' in report:
+                        print(f"  {method}: Acc={report.get('accuracy', 0):.2f}, Halluc={report.get('avg_hallucination', 0):.2f}, AvgK={report.get('avg_retrieval_k', 0):.1f}", flush=True)
+                    elif 'overall' in report:
+                        # per_round
+                        overall = report.get('overall', {})
+                        print(f"  {method}: Final Acc={overall.get('final_accuracy', 0):.2f}, ECE={overall.get('final_ece', 0):.3f}, Brier={overall.get('final_brier', 0):.3f}, Rounds={overall.get('max_rounds', 0)}", flush=True)
+                    else:
+                        print(f"  {method}: {report}", flush=True)
+                else:
+                    print(f"  {method}: {report}", flush=True)
 
 if __name__ == "__main__":
     main()

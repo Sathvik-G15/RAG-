@@ -31,9 +31,17 @@ calibration:
   method: "temperature_scaling"
   default_temperature: 1.0
 
+triage:
+  # Decoupled from AEB confidence_threshold. AEB stops when confidence >= threshold.
+  # Triage bands define risk levels based on final confidence.
+  # urgent_confidence <= routine_confidence <= home_care_confidence
+  urgent_confidence: 0.70    # Confidence < this -> URGENT + ESCALATE
+  routine_confidence: 0.85   # Confidence < this -> ROUTINE + ASK_FOLLOWUP
+  home_care_confidence: 0.85 # Confidence >= this -> HOME_CARE + ANSWER
+
 llm:
-  # microsoft/Llama3-Med-8B-Instruct: medical-tuned, fits 6GB at 4-bit NF4
-  model_name: "microsoft/Llama3-Med-8B-Instruct"
+  # m42-health/Llama3-Med42-8B: medical 8B, fits 6GB VRAM at 4-bit NF4 (~5.5GB)
+  model_name: "m42-health/Llama3-Med42-8B"
   serving_backend: "local_4bit"
   load_in_4bit: true
   bnb_double_quant: true
@@ -43,7 +51,7 @@ llm:
 
 ragas_judge:
   # Use same model family for RAGAS judging
-  model_name: "microsoft/Llama3-Med-8B-Instruct"
+  model_name: "m42-health/Llama3-Med42-8B"
 
 
 embedding:

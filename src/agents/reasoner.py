@@ -493,14 +493,16 @@ class OpenSourceLLMReasoner(BaseReasoner):
             tok.pad_token_id = tok.eos_token_id
 
         max_memory = None
+        device_map = "auto" if torch.cuda.is_available() else None
         if torch.cuda.is_available():
             n_gpus = torch.cuda.device_count()
             if n_gpus > 1:
                 # Multi-GPU (e.g. Kaggle 2xT4)
                 max_memory = {0: "9GiB", 1: "7GiB", "cpu": "18GiB"}
             else:
-                # Single GPU (e.g. RTX 4050 6 GB): cap at 4.5 GiB, leaves 1.5 GiB for activations/KV cache
-                max_memory = {0: "4.5GiB", "cpu": "18GiB"}
+                # Single GPU (e.g. RTX 4050): dedicate directly to GPU 0 to avoid partial CPU dispatch
+                device_map = {"": 0}
+                max_memory = None
 
         if self.load_in_4bit and torch.cuda.is_available():
             quant_config = BitsAndBytesConfig(
@@ -511,7 +513,7 @@ class OpenSourceLLMReasoner(BaseReasoner):
             )
             model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                device_map="auto",
+                device_map=device_map,
                 max_memory=max_memory,
                 quantization_config=quant_config,
                 dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,

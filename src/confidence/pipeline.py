@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..agents.context_builder import infer_profile
 from ..agents.reasoner import make_reasoner
-from ..config import get_app_config, set_global_seeds
+from ..config import get_app_config, set_global_seeds, TriageConfig
 from ..kb.embedder import make_embedder
 from ..kb.ingest import KnowledgeBase
 from ..kb.vector_store import make_vector_store
@@ -28,12 +28,14 @@ class Pipeline:
         kb: KnowledgeBase,
         retriever: HybridRetriever,
         aeb: AEBPipeline,
+        triage_config: TriageConfig,
         prefer_real_llm: bool = False,
         model_name: str | None = None,
     ):
         self.kb = kb
         self.retriever = retriever
         self.aeb = aeb
+        self.triage_config = triage_config
         self.reasoner = aeb.reasoner
         self.model_name = model_name
 
@@ -68,11 +70,13 @@ class Pipeline:
             reasoner=reasoner,
             confidence_model=confidence_model,
             verifier=verifier,
+            config=cfg.aeb,
         )
         return cls(
             kb=kb,
             retriever=retriever,
             aeb=aeb,
+            triage_config=cfg.triage,
             prefer_real_llm=prefer_real,
             model_name=cfg.llm.model_name,
         )
@@ -132,11 +136,13 @@ class Pipeline:
             reasoner=reasoner,
             confidence_model=confidence_model,
             verifier=verifier,
+            config=cfg.aeb,
         )
         return cls(
             kb=kb,
             retriever=retriever,
             aeb=aeb,
+            triage_config=cfg.triage,
             prefer_real_llm=prefer_real,
             model_name=cfg.llm.model_name,
         )
@@ -156,6 +162,7 @@ class Pipeline:
             profile=patient,
             vitals=visit.vitals if visit else None,
             query=query,
+            triage_config=self.triage_config,
         )
         return aeb_result, response
 

@@ -53,11 +53,9 @@ class AEBConfig(BaseModel):
     initial_k: int = 3
     step_k: int = 3
     max_k: int = 15
-    # 0.70 is calibrated to be achievable across both clinical and biomedical QA
-    # benchmarks given the fused signal weights. 0.85 was only reachable on
-    # simple seed queries where all five signals align, causing near-100% budget
-    # exhaustion on MedQA and PubMedQA.
-    confidence_threshold: float = 0.70
+    # No default - MUST be set in configs/seeds.yaml to ensure reproducibility.
+    # If missing, get_app_config() will raise ConfigError.
+    confidence_threshold: float
     stop_on_budget_exhausted: bool = True
     max_rounds: int = 5  # Hard cap on AEB loop iterations (initial_k + max_rounds*step_k = max_k)
 
@@ -73,6 +71,12 @@ class VerificationConfig(BaseModel):
     nli_model: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
     entailment_threshold: float = 0.7
     similarity_threshold: float = 0.75
+
+
+class TriageConfig(BaseModel):
+    urgent_confidence: float = 0.70
+    routine_confidence: float = 0.85
+    home_care_confidence: float = 0.85
 
 
 class LLMConfig(BaseModel):
@@ -102,6 +106,7 @@ class AppConfig(BaseModel):
     aeb: AEBConfig = Field(default_factory=AEBConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    triage: TriageConfig = Field(default_factory=TriageConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ragas_judge: RagasJudgeConfig = Field(default_factory=RagasJudgeConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
@@ -127,10 +132,15 @@ def get_app_config() -> AppConfig:
             if value is not None:
                 seeds[section][key] = value
 
+    # Validate required fields that have no defaults
+    if "aeb" not in seeds or "confidence_threshold" not in seeds["aeb"]:
+        raise ConfigError("Missing required config: aeb.confidence_threshold must be set in configs/seeds.yaml")
+
     return AppConfig(
         aeb=AEBConfig(**seeds.get("aeb", {})),
         retrieval=RetrievalConfig(**seeds.get("retrieval", {})),
         verification=VerificationConfig(**seeds.get("verification", {})),
+        triage=TriageConfig(**seeds.get("triage", {})),
         llm=LLMConfig(**seeds.get("llm", {})),
         ragas_judge=RagasJudgeConfig(**seeds.get("ragas_judge", {})),
         embedding=EmbeddingConfig(**seeds.get("embedding", {})),

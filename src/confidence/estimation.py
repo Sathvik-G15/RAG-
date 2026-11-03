@@ -89,6 +89,8 @@ class ConfidenceModel:
         # factually correct response) cannot drive confidence to near-zero on its
         # own. Real hallucinations still produce a meaningful penalty.
         capped_hallucination = min(signals.hallucination_penalty, 0.5)
+        # Order MUST match ConfidenceSignals fields: retriever_top1, evidence_sufficiency,
+        # support_agreement, raw_confidence, hallucination_penalty
         weights = np.array(
             [self.w_retriever, self.w_evidence, self.w_agreement, self.w_llm, self.w_hallucination],
             dtype=np.float64,
@@ -99,7 +101,7 @@ class ConfidenceModel:
                 signals.evidence_sufficiency,
                 signals.support_agreement,
                 signals.raw_confidence,
-                1.0 - capped_hallucination,
+                1.0 - capped_hallucination,  # 1 - hallucination_penalty = support
             ],
             dtype=np.float64,
         )
