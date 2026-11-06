@@ -1,15 +1,39 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# CAAR-CDSS: Kaggle T4 Benchmark Runner Script
-# Runs all 7 clinical benchmarks with 8B model in fp16 on Kaggle T4 GPU
-# Automatically detects offline uploaded model & datasets if attached
+# CAAR-CDSS: Kaggle Benchmark Execution Script
+# Usage:
+#   bash scripts/kaggle_benchmark.sh part1 250   (Runs seeds, medqa, pubmedqa, mmlumed ~4-5h)
+#   bash scripts/kaggle_benchmark.sh part2 250   (Runs ddxplus, medmcqa, mtsamples ~4-5h)
+#   bash scripts/kaggle_benchmark.sh all 100     (Runs all 7 benchmarks ~3.5h)
 # ==============================================================================
 
 set -e
 
-# Default N=200 to guarantee finishing in ~4-5 hours (well within Kaggle's 12h limit).
-# Can be overridden by passing an argument: bash scripts/kaggle_benchmark.sh 300
-N_SAMPLES=${1:-200}
+STAGE=${1:-part1}
+N_SAMPLES=${2:-250}
+
+if [ "$STAGE" = "part1" ]; then
+    BENCHMARKS="seeds medqa pubmedqa mmlumed"
+    OUT_DIR="kaggle_eval_part1"
+elif [ "$STAGE" = "part2" ]; then
+    BENCHMARKS="ddxplus medmcqa mtsamples"
+    OUT_DIR="kaggle_eval_part2"
+elif [ "$STAGE" = "all" ]; then
+    BENCHMARKS="seeds medqa pubmedqa mmlumed ddxplus medmcqa mtsamples"
+    OUT_DIR="kaggle_eval_all"
+else
+    # Custom benchmarks passed directly
+    BENCHMARKS="$STAGE"
+    OUT_DIR="kaggle_eval_custom"
+fi
+
+echo "======================================================================"
+echo " Starting Kaggle Benchmark Run"
+echo " Stage:      $STAGE"
+echo " Benchmarks: $BENCHMARKS"
+echo " Samples:    N=$N_SAMPLES per dataset"
+echo " Output:     experiments/results/$OUT_DIR"
+echo "======================================================================"
 
 echo "=== 1. Checking GPU Environment ==="
 nvidia-smi
@@ -69,18 +93,21 @@ else
     echo "No offline model found in /kaggle/input. Model will download from Hugging Face if needed."
 fi
 
-echo "=== 4. Running Benchmark Suite on Kaggle GPU (N=$N_SAMPLES per dataset) ==="
+echo "=== 4. Running Benchmark Suite on Kaggle GPU ==="
 python -m src.experiments.runner \
     --mode kaggle_fp16 \
-    --benchmarks seeds medqa pubmedqa mmlumed ddxplus medmcqa mtsamples \
+    --benchmarks $BENCHMARKS \
     --n $N_SAMPLES \
     --compute-matched \
     --per-round \
     --verification-ablation \
     --strict-match \
-    --output experiments/results/kaggle_eval
+    --output "experiments/results/$OUT_DIR"
 
 echo "=== 5. Packaging Results ==="
-tar -czvf /kaggle/working/kaggle_eval_results.tar.gz -C experiments/results kaggle_eval
+ARCHIVE_NAME="${OUT_DIR}_results.tar.gz"
+tar -czvf "/kaggle/working/$ARCHIVE_NAME" -C experiments/results "$OUT_DIR"
 
-echo "=== Done! Download kaggle_eval_results.tar.gz from /kaggle/working ==="
+echo "======================================================================"
+echo " Done! Download $ARCHIVE_NAME from /kaggle/working in the right panel"
+echo "======================================================================"

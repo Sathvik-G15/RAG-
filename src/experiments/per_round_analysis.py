@@ -445,69 +445,93 @@ def run_compute_matched_evaluation(
     benchmark: str,
     out_dir: Path | None = None,
     gc_after_each: bool = False,
+    aeb_report: Any = None,
 ) -> dict[str, Any]:
     """Run compute-matched evaluation: AEB vs fixed-k baselines.
     
     Steps:
-    1. Run AEB to get average k and latency
+    1. Retrieve AEB metrics (or run AEB baseline if not cached)
     2. Run vanilla_k_matched with top_k = round(aeb_avg_k)
     3. Run hybrid_k_matched with top_k = round(aeb_avg_k)
     4. Compare accuracy, hallucination, latency, cost
     """
     print(f"\n=== Compute-matched evaluation on {benchmark.upper()} ===")
     
-    # Step 1: Run AEB
-    print("  Step 1/4: Running AEB baseline...")
-    aeb_results = []
-    aeb_latencies = []
-    aeb_ks = []
-    
-    from ..utils.disk_utils import format_progress
-    import time
-    
-    t_start = time.perf_counter()
-    for idx, q in enumerate(queries):
-        raw_query = q["query"]
-        expected = q["expected_dx"]
-        options = q.get("options")
-        correct_opt = q.get("correct_option")
-        query = build_query_prompt(q)
+    # Step 1: Obtain AEB baseline (reuse existing report if available)
+    if aeb_report is not None and hasattr(aeb_report, "avg_retrieval_k") and aeb_report.avg_retrieval_k > 0:
+        avg_k = max(1, round(aeb_report.avg_retrieval_k))
+        print(f"  Step 1/3: Reusing completed AEB baseline (avg k = {aeb_report.avg_retrieval_k:.1f})")
+        aeb_agg = {
+            "accuracy": aeb_report.accuracy,
+            "avg_confidence": aeb_report.avg_confidence,
+            "avg_hallucination": aeb_report.avg_hallucination,
+            "avg_latency_ms": aeb_report.avg_latency_ms,
+            "avg_retrieval_k": aeb_report.avg_retrieval_k,
+        }
+    else:
+        print("  Step 1/3: Running AEB baseline...")
+        aeb_results = []
+        aeb_ks = []
         
-        patient = infer_profile(query)
-        aeb_result = pipeline.aeb.run(query, patient=patient, max_k_override=15)
+        from ..utils.disk_utils import format_progress
+        import time
         
-        correct = _dx_matches(
-            aeb_result.response.primary_diagnosis,
-            expected,
-            options=options,
-            correct_option=correct_opt,
-            full_response=aeb_result.response,
-        )
+        t_start = time.perf_counter()
+        for idx, q in enumerate(queries):
+            raw_query = q["query"]
+            expected = q["expected_dx"]
+            options = q.get("options")
+            correct_opt = q.get("correct_option")
+            query = build_query_prompt(q)
+            
+            patient = infer_profile(query)
+            aeb_result = pipeline.aeb.run(query, patient=patient, max_k_override=15)
+            
+            correct = _dx_matches(
+                aeb_result.response.primary_diagnosis,
+                expected,
+                options=options,
+                correct_option=correct_opt,
+                full_response=aeb_result.response,
+            )
+            
+            aeb_results.append({
+                "correct": correct,
+                "confidence": aeb_result.response.confidence,
+                "hallucination": aeb_result.response.hallucination_score,
+                "latency_ms": 0,
+                "retrieval_k": aeb_result.total_retrieved,
+            })
+            aeb_ks.append(aeb_result.total_retrieved)
+            
+            elapsed = time.perf_counter() - t_start
+            if (idx + 1) % 5 == 0 or idx == len(queries) - 1:
+                print(f"    [aeb] {format_progress(idx + 1, len(queries), elapsed)}", flush=True)
         
-        aeb_results.append({
-            "correct": correct,
-            "confidence": aeb_result.response.confidence,
-            "hallucination": aeb_result.response.hallucination_score,
-            "latency_ms": 0,  # Will compute separately
-            "retrieval_k": aeb_result.total_retrieved,
-        })
-        aeb_ks.append(aeb_result.total_retrieved)
-        
-        elapsed = time.perf_counter() - t_start
-        if (idx + 1) % 5 == 0 or idx == len(queries) - 1:
-            print(f"    [aeb] {format_progress(idx + 1, len(queries), elapsed)}", flush=True)
-    
-    avg_k = round(sum(aeb_ks) / len(aeb_ks)) if aeb_ks else 10
-    print(f"  AEB average k: {avg_k}")
+        avg_k = max(1, round(sum(aeb_ks) / len(aeb_ks))) if aeb_ks else 10
+        def aggregate_local(results_list: list[dict]) -> dict:
+            if not results_list:
+                return {}
+            n = len(results_list)
+            return {
+                "accuracy": sum(r["correct"] for r in results_list) / n,
+                "avg_confidence": sum(r.get("confidence", 0) for r in results_list) / n,
+                "avg_hallucination": sum(r.get("hallucination_score", 0) for r in results_list) / n,
+                "avg_latency_ms": sum(r.get("latency_ms", 0) for r in results_list) / n,
+                "avg_retrieval_k": sum(r.get("retrieval_k", 0) for r in results_list) / n,
+            }
+        aeb_agg = aggregate_local(aeb_results)
+
+    print(f"  AEB target matching budget: k={avg_k}")
     
     # Step 2: Run vanilla_k_matched
-    print(f"  Step 2/4: Running vanilla_k{avg_k}...")
+    print(f"  Step 2/3: Running vanilla_k{avg_k}...")
     vanilla_results, vanilla_latency = run_fixed_k_matched(
         pipeline, queries, avg_k, method="vanilla", gc_after_each=gc_after_each
     )
     
     # Step 3: Run hybrid_k_matched
-    print(f"  Step 3/4: Running hybrid_k{avg_k}...")
+    print(f"  Step 3/3: Running hybrid_k{avg_k}...")
     hybrid_results, hybrid_latency = run_fixed_k_matched(
         pipeline, queries, avg_k, method="hybrid", gc_after_each=gc_after_each
     )

@@ -676,8 +676,9 @@ def main():
     if args.compute_matched:
         print("\n=== Running compute-matched baselines ===", flush=True)
         for bench_name, queries in all_queries.items():
+            aeb_report = all_results.get(bench_name, {}).get("aeb")
             comparison = run_compute_matched_evaluation(
-                pipeline, queries, bench_name, Path(args.output), gc_after_each=args.gc_after_each
+                pipeline, queries, bench_name, Path(args.output), gc_after_each=args.gc_after_each, aeb_report=aeb_report
             )
             all_results[f"{bench_name}_compute_matched"] = comparison
 
