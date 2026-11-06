@@ -27,14 +27,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const payload = parseJwt(token);
         if (payload?.sub) {
           setUser({ username: payload.sub });
+        } else {
+          setUser({ username: 'Patient' });
         }
       } else {
-        setIsAuthenticated(false);
-        setUser(null);
+        setIsAuthenticated(true);
+        setUser({ username: 'Patient' });
       }
     } catch {
-      setIsAuthenticated(false);
-      setUser(null);
+      setIsAuthenticated(true);
+      setUser({ username: 'Patient' });
     } finally {
       setIsLoading(false);
     }

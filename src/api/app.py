@@ -2,32 +2,38 @@
 
 Endpoints:
   GET  /health                    - liveness probe
-  POST /login                     - issue a (mock) JWT
+  POST /login                     - issue a JWT
   POST /analyze                   - run the full AEB pipeline
   POST /retrieve                  - return raw retrieved evidence
   GET  /metrics                   - aggregate evaluation metrics
   POST /feedback                  - record user feedback
-  POST /guidelines/upload         - ingest PDF/text document into corpus
+  POST /guidelines/upload         - ingest PDF/text document into corpus (admin only)
   GET  /query/{id}                - retrieve past query's full response
-  POST /evaluation/run            - trigger benchmark evaluation run
+  POST /evaluation/run            - trigger benchmark evaluation run (admin only)
   GET  /evaluation/{id}/results   - fetch evaluation results
   POST /review/{response_id}      - human annotation endpoint
   GET  /corpus/stats              - corpus size, chunk count, specialty coverage
 
-Runs entirely in-memory (seed corpus + mock LLM) so it works with zero setup.
-Swap in the real embedder/LLM via --real mode / env flags.
+Security:
+  - Rate limiting on /analyze and /evaluation/run
+  - Admin-only upload and evaluation endpoints
+  - PHI redaction in logs
+  - Prompt-injection fencing for retrieved evidence
+  - External inference blocked by default (requires security.external_inference_allowed=true)
 """
-
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt
 
@@ -60,10 +66,48 @@ from .models import (
     ReviewRequest,
     ReviewResponse,
 )
+from .security import (
+    RateLimiter,
+    MAX_UPLOAD_BYTES,
+    UNTRUSTED_TRUST,
+    redact_phi,
+    require_role,
+    trust_for_source,
+    validate_upload,
+    wrap_evidence,
+)
 
 # Database setup
 _database_engine = None
 _session_maker = None
+
+# Rate limiters
+analyze_limiter = RateLimiter(30, 60)  # 30 calls per 60 seconds
+eval_limiter = RateLimiter(2, 3600)    # 2 calls per hour
+
+# JWT config (read from env in production)
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-me-to-32-random-bytes")
+JWT_ALG = "HS256"
+
+# Admin credentials from environment (for production)
+ADMIN_USERNAME = os.environ.get("CAAR_ADMIN_USER")
+ADMIN_PASSWORD_HASH = os.environ.get("CAAR_ADMIN_PASS_HASH")  # bcrypt hash
+DEV_AUTH_ENABLED = os.environ.get("CAAR_DEV_AUTH", "1") == "1"
+
+# PHI redaction filter for logging
+class PHIFilter(logging.Filter):
+    def filter(self, record):
+        record.msg = redact_phi(str(record.msg))
+        return True
+
+logging.getLogger().addFilter(PHIFilter())
 
 
 @asynccontextmanager
@@ -84,24 +128,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# CAAR-CDSS pipeline initialization (reloaded for unified Chroma KB)
 _pipeline: Pipeline | None = None
 _feedback: list[dict[str, Any]] = []
-
-JWT_SECRET = "dev-secret-change-me-to-32-random-bytes"  # >= 32 bytes
-JWT_ALG = "HS256"
 
 
 def get_pipeline() -> Pipeline:
     global _pipeline
     if _pipeline is None:
-        _pipeline = Pipeline.from_unified_kb()
+        prefer_real = os.environ.get("CAAR_USE_REAL", "0") == "1" or os.environ.get("CAAR_USE_REAL_LLM", "0") == "1"
+        chroma_dir = Path("data/chroma_db")
+        if prefer_real and chroma_dir.exists():
+            _pipeline = Pipeline.from_corpus(chroma_dir=chroma_dir, prefer_real=True)
+        else:
+            _pipeline = Pipeline.from_unified_kb(prefer_real=prefer_real)
     return _pipeline
 
 
 async def get_db_session():
     """FastAPI dependency for database session."""
     if _session_maker is None:
-        # Database not initialized (e.g., in tests)
         yield None
         return
     async with _session_maker() as session:
@@ -111,15 +157,28 @@ async def get_db_session():
             await session.close()
 
 
-def require_auth(authorization: str | None = Header(default=None)) -> str:
+def get_current_claims(authorization: str | None = Header(default=None)) -> dict:
+    """Extract JWT claims. Returns dict with 'role' or 'roles' keys."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = authorization[len("Bearer "):]
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        return payload.get("sub", "anonymous")
+        return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def create_admin_token() -> str:
+    """Create an admin token from environment variables. Only works if ADMIN_USERNAME and ADMIN_PASSWORD_HASH are set."""
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD_HASH:
+        raise RuntimeError("Admin credentials not configured. Set CAAR_ADMIN_USER and CAAR_ADMIN_PASS_HASH.")
+    token = jwt.encode(
+        {"sub": ADMIN_USERNAME, "role": "admin", "exp": int(time.time()) + 3600},
+        JWT_SECRET,
+        algorithm=JWT_ALG
+    )
+    return token
 
 
 def _hash_query(query: str) -> str:
@@ -133,15 +192,25 @@ async def health() -> dict[str, str]:
 
 @app.post("/login")
 async def login(req: LoginRequest) -> dict[str, Any]:
-    # Dev-only: accept any non-empty credentials.
-    token = jwt.encode({"sub": req.username, "exp": int(time.time()) + 3600}, JWT_SECRET, algorithm=JWT_ALG)
-    return {"access_token": token, "token_type": "bearer", "expires_in": 3600}
+    # Dev-only login: only enabled if CAAR_DEV_AUTH=1
+    # In production: verify against user DB with proper password hashing
+    if not DEV_AUTH_ENABLED:
+        raise HTTPException(status_code=401, detail="Login disabled. Set CAAR_DEV_AUTH=1 for development.")
+    
+    # Dev mode: accept any non-empty credentials, but NEVER return role=admin
+    # Admin tokens must be created via environment variables
+    token = jwt.encode(
+        {"sub": req.username, "role": "user", "exp": int(time.time()) + 1800},  # 30 min expiry
+        JWT_SECRET,
+        algorithm=JWT_ALG
+    )
+    return {"access_token": token, "token_type": "bearer", "expires_in": 1800}
 
 
-@app.post("/analyze")
+@app.post("/analyze", dependencies=[Depends(analyze_limiter.dependency())])
 async def analyze(
     req: AnalyzeRequest,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> dict[str, Any]:
     pipeline = get_pipeline()
@@ -182,8 +251,8 @@ async def analyze(
         "confidence": round(resp.confidence, 4),
         "uncertainty": round(resp.uncertainty, 4),
         "hallucination_score": round(resp.hallucination_score, 4),
-        "risk_level": resp.risk_level.value,
-        "decision": resp.decision.value,
+        "risk_level": (resp.risk_level.value if hasattr(resp.risk_level, "value") else str(resp.risk_level)).lower(),
+        "decision": (resp.decision.value if hasattr(resp.decision, "value") else str(resp.decision)).lower(),
         "escalated_reason": resp.escalated_reason,
         "retrieval_k_used": resp.retrieval_k_used,
         "retrieval_steps": len(aeb.steps),
@@ -202,22 +271,28 @@ async def analyze(
         ],
         "reasoning": resp.reasoning,
         "disclaimer": resp.safety_disclaimer,
+        "triage_reasons": getattr(resp, 'triage_reasons', []),
+        "followup_questions": getattr(resp, 'followup_questions', []),
     }
 
     # Log query to database (optional - skip if db not available)
     if db is not None:
-        query_hash = _hash_query(req.query)
-        patient_dict = {
-            "age": req.age,
-            "gender": req.gender,
-            "comorbidities": req.comorbidities,
-            "medications": req.medications,
-            "allergies": req.allergies,
-            "vitals": visit_vitals.model_dump() if visit_vitals else (
-                req.vitals.model_dump() if hasattr(req.vitals, "model_dump") else req.vitals
-            ),
-        }
-        await log_query(db, req.query, _hash_query(req.query), response, patient_dict)
+        try:
+            query_hash = _hash_query(req.query)
+            patient_dict = {
+                "age": req.age,
+                "gender": req.gender,
+                "comorbidities": req.comorbidities,
+                "medications": req.medications,
+                "allergies": req.allergies,
+                "vitals": visit_vitals.model_dump() if visit_vitals else (
+                    req.vitals.model_dump() if hasattr(req.vitals, "model_dump") else req.vitals
+                ),
+            }
+            user_id = claims.get("sub", "anonymous")
+            await log_query(db, req.query, query_hash, response, patient_dict, user_id)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to log query to database: %s", e)
 
     return response
 
@@ -225,7 +300,7 @@ async def analyze(
 @app.post("/retrieve")
 async def retrieve(
     req: AnalyzeRequest,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> dict[str, Any]:
     pipeline = get_pipeline()
@@ -246,7 +321,7 @@ async def retrieve(
 
 
 @app.get("/metrics")
-async def metrics(auth: str = Depends(require_auth)) -> dict[str, Any]:
+async def metrics(claims: dict = Depends(get_current_claims)) -> dict[str, Any]:
     pipeline = get_pipeline()
     report = evaluate(pipeline, get_seed_queries(), method="aeb")
     return {
@@ -264,38 +339,36 @@ async def metrics(auth: str = Depends(require_auth)) -> dict[str, Any]:
 @app.post("/feedback")
 async def feedback(
     req: FeedbackRequest,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
 ) -> dict[str, str]:
     _feedback.append({"query": req.query, "helpful": req.helpful, "comment": req.comment, "ts": time.time()})
     return {"status": "recorded"}
 
 
-# === New Sprint 2 Endpoints ===
+# === Admin-only endpoints ===
 
-
-@app.post("/guidelines/upload", response_model=GuidelineUploadResponse)
+@app.post("/guidelines/upload", response_model=GuidelineUploadResponse, dependencies=[Depends(require_role("admin", get_current_claims))])
 async def upload_guideline(
     source: str = Form(...),
     title: str | None = Form(None),
     year: int | None = Form(None),
-    trust_score: float = Form(0.8),
+    trust_score: float = Form(0.8),  # IGNORED - server assigns trust
     file: UploadFile = File(...),
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> GuidelineUploadResponse:
-    """Ingest a PDF or text document into the corpus at runtime."""
+    """Ingest a PDF or text document into the corpus at runtime. Admin only."""
     pipeline = get_pipeline()
     kb = pipeline.kb
 
     content = await file.read()
+    # Validate upload
+    validate_upload(file.filename, content)
+
     text = ""
-
     if file.content_type == "application/pdf":
-        # Parse PDF using pdfplumber
         import io
-
         import pdfplumber
-
         pdf_file = io.BytesIO(content)
         text_parts = []
         with pdfplumber.open(pdf_file) as pdf:
@@ -304,9 +377,7 @@ async def upload_guideline(
                 if page_text:
                     text_parts.append(page_text)
         text = "\n\n".join(text_parts)
-
         if not text.strip():
-            # Fallback: try to decode as text (some PDFs are actually text files)
             text = content.decode("utf-8", errors="ignore")
     else:
         text = content.decode("utf-8", errors="ignore")
@@ -318,6 +389,9 @@ async def upload_guideline(
             document_id=title or file.filename,
         )
 
+    # Server-side trust assignment (ignore client-sent trust_score)
+    assigned_trust = trust_for_source(source, {"WHO": 0.95, "CDC": 0.95, "NICE": 0.93, "NIH": 0.93, "PubMed": 0.80})
+    
     chunks = kb.add_documents(
         [
             {
@@ -325,7 +399,7 @@ async def upload_guideline(
                 "source": source,
                 "title": title or file.filename,
                 "year": year,
-                "trust_score": trust_score,
+                "trust_score": assigned_trust,  # Use server-assigned trust
             }
         ]
     )
@@ -340,13 +414,16 @@ async def upload_guideline(
 @app.get("/query/{query_id}", response_model=QueryHistoryResponse)
 async def get_query_history(
     query_id: UUID,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> QueryHistoryResponse:
-    """Retrieve a past query's full response and retrieved evidence."""
+    """Retrieve a past query's full response and retrieved evidence. Users can only access their own queries; admins can access all."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    query_log = await get_query_log(db, query_id)
+    user_id = claims.get("sub", "anonymous")
+    roles = claims.get("roles") or [claims.get("role", "user")]
+    is_admin = "admin" in roles
+    query_log = await get_query_log(db, query_id, user_id=user_id, is_admin=is_admin)
     if not query_log:
         raise HTTPException(status_code=404, detail="Query not found")
 
@@ -367,6 +444,8 @@ async def get_query_history(
         differential=query_log.differential,
         evidence=query_log.evidence,
         reasoning=query_log.reasoning,
+        followup_questions=getattr(query_log, 'followup_questions', []),
+        triage_reasons=getattr(query_log, 'triage_reasons', []),
         patient_age=query_log.patient_age,
         patient_gender=query_log.patient_gender,
         patient_comorbidities=query_log.patient_comorbidities,
@@ -384,14 +463,11 @@ async def _run_evaluation_background(
     n_samples: int,
 ):
     """Background task to run evaluation."""
-
     async with _session_maker() as session:
         try:
             pipeline = get_pipeline()
             queries = get_seed_queries()[:n_samples]
-
             report = evaluate(pipeline, queries, method=method)
-
             await update_evaluation_run(
                 session,
                 eval_id,
@@ -410,21 +486,20 @@ async def _run_evaluation_background(
             await update_evaluation_run(session, eval_id, "failed", error=str(e))
 
 
-@app.post("/evaluation/run", response_model=EvaluationRunResponse)
+@app.post("/evaluation/run", response_model=EvaluationRunResponse, dependencies=[Depends(eval_limiter.dependency()), Depends(require_role("admin", get_current_claims))])
 async def run_evaluation(
     request: EvaluationRunRequest,
     background_tasks: BackgroundTasks,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> EvaluationRunResponse:
-    """Trigger a benchmark evaluation run in the background."""
+    """Trigger a benchmark evaluation run in the background. Admin only, rate limited."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     eval_id = await create_evaluation_run(
         db, request.method, request.benchmark, request.n_samples, request.config
     )
 
-    # Schedule background evaluation
     background_tasks.add_task(
         _run_evaluation_background,
         eval_id,
@@ -448,7 +523,7 @@ async def run_evaluation(
 @app.get("/evaluation/{eval_id}/results", response_model=EvaluationResultsResponse)
 async def get_evaluation_results(
     eval_id: UUID,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> EvaluationResultsResponse:
     """Fetch evaluation run results."""
@@ -487,22 +562,27 @@ async def get_evaluation_results(
 async def submit_review(
     response_id: UUID,
     request: ReviewRequest,
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> ReviewResponse:
-    """Submit human annotation for a query response or evaluation."""
+    """Submit human annotation for a query response or evaluation. Users can only review their own queries; admins can review all."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     from sqlalchemy import select
 
-    # Verify the query_log or evaluation exists
-    if request.hallucination_flag is not None:
-        # Check if it's a query log or evaluation
-        query_exists = False
-        eval_exists = False
+    user_id = claims.get("sub", "anonymous")
+    roles = claims.get("roles") or [claims.get("role", "user")]
+    is_admin = "admin" in roles
 
+    query_exists = False
+    eval_exists = False
+
+    if request.hallucination_flag is not None:
         if response_id:
-            query_result = await db.execute(select(QueryLog).where(QueryLog.id == response_id))
+            stmt = select(QueryLog).where(QueryLog.id == response_id)
+            if not is_admin:
+                stmt = stmt.where(QueryLog.user_id == user_id)
+            query_result = await db.execute(stmt)
             query_exists = query_result.scalar_one_or_none() is not None
 
             eval_result = await db.execute(select(EvaluationRun).where(EvaluationRun.id == response_id))
@@ -533,18 +613,16 @@ async def submit_review(
 
 @app.get("/corpus/stats", response_model=CorpusStatsResponse)
 async def get_corpus_stats(
-    auth: str = Depends(require_auth),
+    claims: dict = Depends(get_current_claims),
     db=Depends(get_db_session),
 ) -> CorpusStatsResponse:
     """Get corpus statistics: size, chunk count, specialty coverage."""
     from sqlalchemy import select
 
-    # Try to get from database cache first
-    from .database import CorpusStats
     if db is not None:
+        from .database import CorpusStats
         result = await db.execute(select(CorpusStats).limit(1))
         stats = result.scalar_one_or_none()
-
         if stats:
             return CorpusStatsResponse(
                 total_chunks=stats.total_chunks,
@@ -554,7 +632,6 @@ async def get_corpus_stats(
                 last_updated=stats.last_updated,
             )
 
-    # Fallback: compute from store (InMemoryVectorStore or ChromaDB)
     pipeline = get_pipeline()
     store = pipeline.kb.store
 
@@ -583,7 +660,6 @@ async def get_corpus_stats(
 
     if hasattr(store, "_collection"):
         total_chunks = store._collection.count()
-        # Get specialty distribution
         results = store._collection.get(include=["metadatas"])
         specialty_dist = {}
         source_dist = {}
@@ -593,7 +669,6 @@ async def get_corpus_stats(
             specialty_dist[spec] = specialty_dist.get(spec, 0) + 1
             source_dist[src] = source_dist.get(src, 0) + 1
 
-        # Update cache
         if db is not None:
             await update_corpus_stats(db, total_chunks, len(set(r.get("source") for r in results.get("metadatas", []))), specialty_dist, source_dist)
 

@@ -100,6 +100,8 @@ export const analyzeResponseSchema = z.object({
   ),
   reasoning: z.string(),
   disclaimer: z.string(),
+  followup_questions: z.array(z.string()).optional(),
+  triage_reasons: z.array(z.string()).optional(),
 });
 
 export type AnalyzeResponse = z.infer<typeof analyzeResponseSchema>;

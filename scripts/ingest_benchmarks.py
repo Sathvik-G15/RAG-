@@ -1,3 +1,4 @@
+
 """Ingest all local benchmark datasets into ChromaDB for fully offline use.
 
 This embeds benchmark content (questions + context + answers) as medical

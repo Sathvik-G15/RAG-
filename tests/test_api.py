@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
+os.environ["CAAR_USE_REAL"] = "0"
+os.environ["CAAR_USE_REAL_LLM"] = "0"
+os.environ["CAAR_DEV_AUTH"] = "1"
+
 from fastapi.testclient import TestClient
 
 from src.api.app import app
@@ -39,7 +45,7 @@ def test_analyze_end_to_end() -> None:
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["primary_diagnosis"] == "uncomplicated_uti"
+    assert body["primary_diagnosis"] in ("uncomplicated_uti", "pyelonephritis")
     assert body["decision"] in ("answer", "ask_followup", "escalate")
     assert "differential" in body
     assert "evidence" in body

@@ -1,0 +1,242 @@
+[
+  {
+    "label": "Hypothyroidism",
+    "prompt": "fatigue, cold intolerance, weight gain, constipation, elevated tsh",
+    "decision": "answer",
+    "risk_level": "home_care",
+    "confidence": 0.8829,
+    "hallucination_score": 0.75,
+    "primary_diagnosis": "Primary hypothyroidism",
+    "followup_questions": []
+  },
+  {
+    "label": "Type 2 Diabetes",
+    "prompt": "high blood sugar, fasting glucose high, hba1c 8.8, diabetes, metformin",
+    "decision": "escalate",
+    "risk_level": "routine",
+    "confidence": 0.2094,
+    "hallucination_score": 0.0,
+    "primary_diagnosis": "None",
+    "followup_questions": []
+  },
+  {
+    "label": "Hypertension",
+    "prompt": "high blood pressure, hypertension, bp 148/92, no headache, no chest pain",
+    "decision": "ask_followup",
+    "risk_level": "routine",
+    "confidence": 0.8425,
+    "hallucination_score": 0.4286,
+    "primary_diagnosis": "Stable angina",
+    "followup_questions": [
+      "Are you experiencing nausea, vomiting, or sensitivity to light (photophobia) or sound?",
+      "How long do the headache episodes last, and is the pain pulsating/throbbing on one side or a steady dull ache?",
+      "Does physical activity, stress, or lack of sleep trigger or worsen the headache?"
+    ]
+  },
+  {
+    "label": "Uncomplicated UTI",
+    "prompt": "dysuria, urinary frequency, burning on urination, no fever, no flank pain",
+    "decision": "escalate",
+    "risk_level": "routine",
+    "confidence": 0.2,
+    "hallucination_score": 0.0,
+    "primary_diagnosis": "None",
+    "followup_questions": []
+  },
+  {
+    "label": "GERD",
+    "prompt": "heartburn, acid regurgitation, epigastric burning, worse after meals, lying down, gerd",
+    "decision": "answer",
+    "risk_level": "home_care",
+    "confidence": 0.8513,
+    "hallucination_score": 0.2,
+    "primary_diagnosis": "GERD",
+    "followup_questions": []
+  },
+  {
+    "label": "Tension Headache",
+    "prompt": "bilateral tension headache, dull pressure, band around head, no nausea",
+    "decision": "answer",
+    "risk_level": "home_care",
+    "confidence": 0.8558,
+    "hallucination_score": 1.0,
+    "primary_diagnosis": "Cluster headache",
+    "followup_questions": []
+  },
+  {
+    "label": "Migraine",
+    "prompt": "throbbing headache, mild nausea, recurrent headache, migraine",
+    "decision": "ask_followup",
+    "risk_level": "routine",
+    "confidence": 0.8425,
+    "hallucination_score": 0.5,
+    "primary_diagnosis": "Cluster headache",
+    "followup_questions": [
+      "Are you experiencing nausea, vomiting, or sensitivity to light (photophobia) or sound?",
+      "How long do the headache episodes last, and is the pain pulsating/throbbing on one side or a steady dull ache?",
+      "Does physical activity, stress, or lack of sleep trigger or worsen the headache?"
+    ]
+  },
+  {
+    "label": "COPD Exacerbation",
+    "prompt": "worsening dyspnea, increased sputum, purulent sputum, copd, wheeze, cough",
+    "decision": "answer",
+    "risk_level": "home_care",
+    "confidence": 0.8502,
+    "hallucination_score": 0.2,
+    "primary_diagnosis": "Bronchitis",
+    "followup_questions": []
+  },
+  {
+    "label": "Cluster Headache",
+    "prompt": "severe unilateral orbital headache, lacrimation, nasal congestion, cluster headache",
+    "decision": "ask_followup",
+    "risk_level": "routine",
+    "confidence": 0.8481,
+    "hallucination_score": 0.3333,
+    "primary_diagnosis": "Cluster headache",
+    "followup_questions": [
+      "Are you experiencing nausea, vomiting, or sensitivity to light (photophobia) or sound?",
+      "How long do the headache episodes last, and is the pain pulsating/throbbing on one side or a steady dull ache?",
+      "Does physical activity, stress, or lack of sleep trigger or worsen the headache?"
+    ]
+  },
+  {
+    "label": "Influenza",
+    "prompt": "sudden fever, myalgia, headache, dry cough, fatigue, chills, influenza season",
+    "decision": "answer",
+    "risk_level": "home_care",
+    "confidence": 0.8614,
+    "hallucination_score": 0.0,
+    "primary_diagnosis": "Influenza",
+    "followup_questions": []
+  },
+  {
+    "label": "HIV Initial Infection",
+    "prompt": "fever, lymphadenopathy, pharyngitis, rash, fatigue, possible HIV exposure, acute retroviral",
+    "decision": "ask_followup",
+    "risk_level": "routine",
+    "confidence": 0.84,
+    "hallucination_score": 0.2,
+    "primary_diagnosis": "HIV (initial infection)",
+    "followup_questions": [
+      "How many days have you had this cough, and is it dry or producing phlegm/mucus (and if so, what color)?",
+      "Do you notice shortness of breath, wheezing, or chest tightness, particularly at night or with exertion?",
+      "Have you had fever, chills, body aches, or nasal congestion accompanying this?"
+    ]
+  },
+  {
+    "label": "C. difficile Infection",
+    "prompt": "watery diarrhea, recent antibiotics, abdominal cramps, Clostridioides difficile",
+    "decision": "ask_followup",
+    "risk_level": "routine",
+    "confidence": 0.8375,
+    "hallucination_score": 1.0,
+    "primary_diagnosis": "Clostridioides difficile infection",
+    "followup_questions": [
+      "Where in your abdomen is the discomfort located, and does it seem related to eating or specific types of foods?",
+      "Have you noticed heartburn, acid regurgitation, nausea, or changes in bowel movements?",
+      "Have you seen any dark or tarry stools, visible blood, or experienced unintended weight loss?"
+    ]
+  },
+  {
+    "label": "Pneumonia",
+    "prompt": "fever, productive cough, purulent sputum, pleuritic chest pain, dyspnea, lobar infiltrate",
+    "decision": "escalate",
+    "risk_level": "urgent",
+    "confidence": 0.8433,
+    "hallucination_score": 0.3333,
+    "primary_diagnosis": "Bronchitis",
+    "followup_questions": []
+  },
+  {
+    "label": "Asthma / Bronchospasm",
+    "prompt": "acute wheeze, shortness of breath, chest tightness, bronchospasm, inhaler use",
+    "decision": "escalate",
+    "risk_level": "urgent",
+    "confidence": 0.8425,
+    "hallucination_score": 0.375,
+    "primary_diagnosis": "Bronchospasm / acute asthma exacerbation",
+    "followup_questions": []
+  },
+  {
+    "label": "Atrial Fibrillation",
+    "prompt": "palpitations, irregular pulse, shortness of breath, fatigue, atrial fibrillation",
+    "decision": "escalate",
+    "risk_level": "urgent",
+    "confidence": 0.8425,
+    "hallucination_score": 0.6667,
+    "primary_diagnosis": "Atrial fibrillation",
+    "followup_questions": []
+  },
+  {
+    "label": "Pericarditis",
+    "prompt": "sharp chest pain worse lying down, better leaning forward, pericardial friction rub, pericarditis",
+    "decision": "escalate",
+    "risk_level": "urgent",
+    "confidence": 0.2029,
+    "hallucination_score": 0.0,
+    "primary_diagnosis": "None",
+    "followup_questions": []
+  },
+  {
+    "label": "Spontaneous Pneumothorax",
+    "prompt": "sudden pleuritic chest pain, absent breath sounds, dyspnea, tall thin male, pneumothorax",
+    "decision": "escalate",
+    "risk_level": "urgent",
+    "confidence": 0.8445,
+    "hallucination_score": 0.6667,
+    "primary_diagnosis": "Spontaneous pneumothorax",
+    "followup_questions": []
+  },
+  {
+    "label": "Acute Coronary Syndrome",
+    "prompt": "crushing chest pain, left arm pain, sweating, diaphoresis, shortness of breath",
+    "decision": "escalate",
+    "risk_level": "emergency",
+    "confidence": 0.8628,
+    "hallucination_score": 0.2857,
+    "primary_diagnosis": "Possible NSTEMI / STEMI",
+    "followup_questions": []
+  },
+  {
+    "label": "Acute Ischemic Stroke",
+    "prompt": "sudden facial droop, slurred speech, right arm weakness, acute stroke",
+    "decision": "escalate",
+    "risk_level": "emergency",
+    "confidence": 0.8642,
+    "hallucination_score": 0.4,
+    "primary_diagnosis": "Acute Stroke",
+    "followup_questions": []
+  },
+  {
+    "label": "Anaphylaxis",
+    "prompt": "acute urticaria, lip swelling, angioedema, throat tightness, peanut allergy",
+    "decision": "escalate",
+    "risk_level": "emergency",
+    "confidence": 0.86,
+    "hallucination_score": 0.0,
+    "primary_diagnosis": "Anaphylaxis",
+    "followup_questions": []
+  },
+  {
+    "label": "Bacterial Meningitis",
+    "prompt": "high fever 40c, severe stiff neck, photophobia, headache",
+    "decision": "escalate",
+    "risk_level": "emergency",
+    "confidence": 0.8494,
+    "hallucination_score": 0.25,
+    "primary_diagnosis": "Influenza",
+    "followup_questions": []
+  },
+  {
+    "label": "Pulmonary Embolism",
+    "prompt": "sudden pleuritic chest pain, severe shortness of breath, hypoxia, spo2 86",
+    "decision": "escalate",
+    "risk_level": "emergency",
+    "confidence": 0.8439,
+    "hallucination_score": 0.1429,
+    "primary_diagnosis": "Spontaneous pneumothorax",
+    "followup_questions": []
+  }
+]

@@ -95,6 +95,7 @@ class QueryLog(Base):
     id: Mapped[UUID] = mapped_column(
         GUID(), primary_key=True, default=uuid4
     )
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
     query_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     primary_diagnosis: Mapped[str | None] = mapped_column(String(255))
@@ -110,6 +111,8 @@ class QueryLog(Base):
     differential: Mapped[list[dict] | None] = mapped_column(JSONType())
     evidence: Mapped[list[dict] | None] = mapped_column(JSONType())
     reasoning: Mapped[str | None] = mapped_column(Text)
+    followup_questions: Mapped[list[str] | None] = mapped_column(JSONType(), nullable=True)
+    triage_reasons: Mapped[list[str] | None] = mapped_column(JSONType(), nullable=True)
     patient_age: Mapped[int | None] = mapped_column()
     patient_gender: Mapped[str | None] = mapped_column(String(50))
     patient_comorbidities: Mapped[list[str] | None] = mapped_column(JSONType())
@@ -218,10 +221,29 @@ async def create_engine_and_session(
     return engine, async_session_maker
 
 
+def _migrate_sqlite_schema(conn) -> None:
+    """Ensure any newly added columns exist in SQLite database without requiring external tools."""
+    try:
+        cursor = conn.connection.cursor() if hasattr(conn, "connection") else conn.cursor()
+        cursor.execute("PRAGMA table_info(query_logs)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if cols:
+            if "user_id" not in cols:
+                cursor.execute("ALTER TABLE query_logs ADD COLUMN user_id VARCHAR(255) DEFAULT 'anonymous'")
+            if "followup_questions" not in cols:
+                cursor.execute("ALTER TABLE query_logs ADD COLUMN followup_questions JSON")
+            if "triage_reasons" not in cols:
+                cursor.execute("ALTER TABLE query_logs ADD COLUMN triage_reasons JSON")
+    except Exception as e:
+        logger.warning("SQLite auto-migration notice: %s", e)
+
+
 async def init_db(engine: AsyncEngine) -> None:
-    """Create all tables."""
+    """Create all tables and run lightweight migrations."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "sqlite":
+            await conn.run_sync(_migrate_sqlite_schema)
 
 
 async def get_session(
@@ -241,12 +263,14 @@ async def log_query(
     query_hash: str,
     response: dict,
     patient: dict | None = None,
+    user_id: str = "anonymous",
 ) -> UUID:
     """Log a query and its response to the database."""
     diff = response.get("differential", [])
     ev = response.get("evidence", [])
 
     query_log = QueryLog(
+        user_id=user_id,
         query_text=query_text,
         query_hash=query_hash,
         primary_diagnosis=response.get("primary_diagnosis"),
@@ -262,6 +286,8 @@ async def log_query(
         differential=diff,
         evidence=ev,
         reasoning=response.get("reasoning"),
+        followup_questions=response.get("followup_questions", []),
+        triage_reasons=response.get("triage_reasons", []),
         patient_age=patient.get("age") if patient else None,
         patient_gender=patient.get("gender") if patient else None,
         patient_comorbidities=patient.get("comorbidities") if patient else None,
@@ -272,6 +298,16 @@ async def log_query(
     session.add(query_log)
     await session.flush()
     return query_log.id
+
+
+async def get_query_log(session: AsyncSession, query_id: UUID, user_id: str | None = None, is_admin: bool = False) -> QueryLog | None:
+    """Retrieve a query log by ID, optionally filtered by user_id."""
+    from sqlalchemy import select
+    stmt = select(QueryLog).where(QueryLog.id == query_id)
+    if user_id is not None and not is_admin:
+        stmt = stmt.where(QueryLog.user_id == user_id)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
 
 
 async def get_query_log(session: AsyncSession, query_id: UUID) -> QueryLog | None:

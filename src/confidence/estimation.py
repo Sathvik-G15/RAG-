@@ -1,9 +1,16 @@
-"""Confidence estimation: fuse retriever, evidence, agreement, and calibration."""
+"""Confidence estimation: fuse retriever, evidence, agreement, and calibration.
 
+Supports both:
+- Fixed-weight fusion (legacy, for ablations)
+- Learned fusion (LogisticRegression + IsotonicRegression) from calibration study
+"""
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
+import re
+from typing import Any, Optional
 
 import numpy as np
 
@@ -56,41 +63,87 @@ def compute_signals(
     probs = [d.probability for d in response.differential]
     retriever = _retriever_sufficiency(evidence)
     agreement = _agreement(probs)
+
+    # 1. Check explicit supporting_evidence count on differential
     support_count = sum(1 for d in response.differential if d.supporting_evidence)
-    evidence_sufficiency = min(1.0, support_count / max(len(response.differential), 1))
+    
+    # 2. If open-source LLM did not populate supporting_evidence list,
+    # evaluate whether the top differential diagnoses are grounded in the retrieved evidence
+    if support_count == 0 and evidence and response.differential:
+        ev_text = " ".join((c.text + " " + (c.title or "")).lower() for c in evidence)
+        top_dx = response.differential[0].diagnosis.lower()
+        # Extract meaningful terms from diagnosis name
+        dx_tokens = [t for t in re.findall(r"[a-z0-9]+", top_dx) if len(t) >= 4]
+        if dx_tokens and any(tok in ev_text for tok in dx_tokens):
+            # Primary diagnosis directly matches retrieved clinical guideline!
+            evidence_sufficiency = 0.90
+        elif evidence:
+            top_sim = max((getattr(c, "similarity_score", 0.0) or 0.0) for c in evidence)
+            evidence_sufficiency = min(1.0, max(0.5, float(top_sim)))
+        else:
+            evidence_sufficiency = 0.0
+    else:
+        evidence_sufficiency = min(1.0, support_count / max(len(response.differential), 1))
+
     hallucination_penalty = verification.hallucination_score if verification else 0.0
+    raw_conf = max(response.confidence, probs[0] if probs else 0.0)
 
     return ConfidenceSignals(
-        retriever_top1=_retriever_sufficiency(evidence),
+        retriever_top1=retriever,
         evidence_sufficiency=evidence_sufficiency,
         support_agreement=agreement,
         hallucination_penalty=hallucination_penalty,
-        raw_confidence=response.confidence,
+        raw_confidence=raw_conf,
     )
 
 
 @dataclass
 class ConfidenceModel:
-    """Weighted fusion of signals; optionally temperature-scaled."""
+    """Weighted fusion of signals; optionally temperature-scaled (legacy path)."""
 
-    w_retriever: float = 0.15
-    w_evidence: float = 0.30
-    w_agreement: float = 0.25
-    w_llm: float = 0.15
-    w_hallucination: float = 0.15
+    w_retriever: float = 0.20
+    w_evidence: float = 0.35
+    w_agreement: float = 0.30
+    w_llm: float = 0.10
+    w_hallucination: float = 0.05
     temperature: float = 1.0
+    # Learned fusion (new path)
+    _learned_model: Any = None
+    _signal_names: list[str] = None
 
     def calibrate(self, temperature: float) -> None:
         self.temperature = max(0.1, temperature)
 
+    def load_learned_fusion(self, model_path: str | Path, signal_names: list[str] | None = None) -> None:
+        """Load a trained fusion model (joblib dump of LearnedFusion)."""
+        import joblib
+        self._learned_model = joblib.load(model_path)
+        self._signal_names = signal_names or [
+            "retriever_top1",
+            "evidence_sufficiency",
+            "support_agreement",
+            "raw_confidence",
+            "hallucination_inverse",  # 1 - hallucination_penalty (uncapped)
+        ]
+
     def score(self, signals: ConfidenceSignals) -> float:
-        # Cap hallucination penalty at 0.5 so that a false-positive hallucination
-        # signal from an off-domain corpus (token-overlap near zero even for a
-        # factually correct response) cannot drive confidence to near-zero on its
-        # own. Real hallucinations still produce a meaningful penalty.
-        capped_hallucination = min(signals.hallucination_penalty, 0.5)
-        # Order MUST match ConfidenceSignals fields: retriever_top1, evidence_sufficiency,
-        # support_agreement, raw_confidence, hallucination_penalty
+        # If learned model is available, use it (new path)
+        if self._learned_model is not None:
+            # Use uncapped hallucination_inverse = 1 - hallucination_penalty
+            hallucination_inverse = 1.0 - signals.hallucination_penalty
+            X = np.array([[
+                signals.retriever_top1,
+                signals.evidence_sufficiency,
+                signals.support_agreement,
+                signals.raw_confidence,
+                hallucination_inverse,
+            ]], dtype=np.float64)
+            return float(np.clip(self._learned_model.predict(X)[0], 0.0, 1.0))
+
+        # Legacy fixed-weight path (for ablations)
+        # Cap hallucination penalty at 0.35 so that a false-positive hallucination
+        # signal from conversational sentences cannot drive confidence to near-zero.
+        capped_hallucination = min(signals.hallucination_penalty, 0.35)
         weights = np.array(
             [self.w_retriever, self.w_evidence, self.w_agreement, self.w_llm, self.w_hallucination],
             dtype=np.float64,
@@ -101,7 +154,7 @@ class ConfidenceModel:
                 signals.evidence_sufficiency,
                 signals.support_agreement,
                 signals.raw_confidence,
-                1.0 - capped_hallucination,  # 1 - hallucination_penalty = support
+                1.0 - capped_hallucination,
             ],
             dtype=np.float64,
         )

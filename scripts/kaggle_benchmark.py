@@ -30,7 +30,7 @@ N_QUERIES = 50
 BENCHMARKS = "medqa"
 INGEST_LIMIT = 2000
 RUN_RAGAS = True
-JUDGE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+JUDGE_MODEL = "microsoft/Phi-3.5-mini-instruct"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 CHROMA_DIR = "/kaggle/working/chroma_db"
 

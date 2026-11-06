@@ -51,7 +51,26 @@ export async function getAuthToken(): Promise<string | null> {
     return memoryToken;
   }
 
-  // Token is expired or missing — clear and return null (caller redirects to login)
+  // Auto-acquire dev token seamlessly for the patient portal if missing or expired
+  try {
+    const baseUrl = config.VITE_API_URL.replace(/\/+$/, '');
+    const res = await fetch(`${baseUrl}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'patient', password: 'dev' }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.access_token) {
+        setAuthToken(data.access_token);
+        return data.access_token;
+      }
+    }
+  } catch {
+    // Backend offline or mock test environment
+  }
+
+  // Token is expired or missing — clear and return null
   clearAuthToken();
   return null;
 }

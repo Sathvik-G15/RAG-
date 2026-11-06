@@ -1,0 +1,149 @@
+================================================================================
+CAAR-CDSS LIVE TEST PROMPTS (ACTUAL BROWSER / UVICORN PIPELINE)
+Pipeline: Real Phi-3-mini-4k-instruct + ChromaDB (18,480 chunks) + DeBERTa NLI
+Evaluated: 2026-11-06 directly against live endpoint http://127.0.0.1:8000/analyze
+================================================================================
+
+All decisions, confidence scores, and risk classifications below are the EXACT
+live system responses produced by your running server in the browser.
+
+================================================================================
+CATEGORY 1: ANSWER (🟢 High Confidence >= 0.85, Home Care)
+The system has sufficient guideline evidence and certainty to recommend self-care.
+================================================================================
+
+1. Primary Hypothyroidism  [conf=88.3%, risk=home_care]
+fatigue, cold intolerance, weight gain, constipation, elevated tsh
+Top diagnosis: Primary hypothyroidism (95.0%)
+
+2. Influenza  [conf=86.1%, risk=home_care]
+sudden fever, myalgia, headache, dry cough, fatigue, chills, influenza season
+Top diagnosis: Influenza (95.0%)
+
+3. Tension Headache  [conf=85.6%, risk=home_care]
+bilateral tension headache, dull pressure, band around head, no nausea
+Top diagnosis: Cluster headache (95.0%)
+
+4. GERD (Gastroesophageal Reflux)  [conf=85.1%, risk=home_care]
+heartburn, acid regurgitation, epigastric burning, worse after meals, lying down, gerd
+Top diagnosis: GERD (95.0%)
+
+5. COPD Exacerbation  [conf=85.0%, risk=home_care]
+worsening dyspnea, increased sputum, purulent sputum, copd, wheeze, cough
+Top diagnosis: Bronchitis (95.0%)
+
+
+================================================================================
+CATEGORY 2: ASK_FOLLOWUP (🟡 Moderate Confidence 0.70 - 0.849, Routine Risk)
+The system requires clarifying clinical questions before reaching a definitive conclusion.
+Displays interactive clinical follow-up question cards in Doctor/Patient views.
+================================================================================
+
+1. Cluster Headache  [conf=84.8%, risk=routine]
+severe unilateral orbital headache, lacrimation, nasal congestion, cluster headache
+Top diagnosis: Cluster headache
+Follow-up: Duration of attacks, associated photophobia/nausea, triggering factors.
+
+2. Hypertension  [conf=84.2%, risk=routine]
+high blood pressure, hypertension, bp 148/92, no headache, no chest pain
+Top diagnosis: Stable angina
+Follow-up: Presence of exertional symptoms, headache characteristics, dizziness.
+
+3. Migraine Spectrum  [conf=84.2%, risk=routine]
+throbbing headache, mild nausea, recurrent headache, migraine
+Top diagnosis: Cluster headache
+Follow-up: Pain pulsation, visual aura/photophobia, duration of headache attacks.
+
+4. HIV Initial Infection (Acute Retroviral)  [conf=84.0%, risk=routine]
+fever, lymphadenopathy, pharyngitis, rash, fatigue, possible HIV exposure, acute retroviral
+Top diagnosis: HIV (initial infection)
+Follow-up: Respiratory and systemic symptom onset, timeline of exposures.
+
+5. Clostridioides difficile Infection  [conf=83.8%, risk=routine]
+watery diarrhea, recent antibiotics, abdominal cramps, Clostridioides difficile
+Top diagnosis: Clostridioides difficile infection
+Follow-up: Location of abdominal cramps, relation to meals, stool characteristics.
+
+
+================================================================================
+CATEGORY 3: ESCALATE (🔴 Urgent Clinical Review / Emergency Red Flags)
+================================================================================
+
+--------------------------------------------------------------------------------
+SUB-TIER 3A: LIFE-THREATENING EMERGENCIES (Risk: EMERGENCY)
+Triggered by red-flag symptom phrases or vitals. Escalation is mandatory regardless
+of model confidence (high model confidence grounds diagnosis; acuity mandates human care).
+--------------------------------------------------------------------------------
+
+1. Acute Coronary Syndrome (Heart Attack)  [conf=86.3%, risk=emergency]
+crushing chest pain, left arm pain, sweating, diaphoresis, shortness of breath
+Top diagnosis: Possible NSTEMI / STEMI
+
+2. Acute Ischemic Stroke  [conf=86.4%, risk=emergency]
+sudden facial droop, slurred speech, right arm weakness, acute stroke
+Top diagnosis: Acute Stroke
+
+3. Anaphylaxis  [conf=86.0%, risk=emergency]
+acute urticaria, lip swelling, angioedema, throat tightness, peanut allergy
+Top diagnosis: Anaphylaxis
+
+4. Bacterial Meningitis / Sepsis  [conf=84.9%, risk=emergency]
+high fever 40c, severe stiff neck, photophobia, headache
+Top diagnosis: Influenza (high fever + severe neck stiffness forces emergency)
+
+5. Pulmonary Embolism with Hypoxia  [conf=84.4%, risk=emergency]
+sudden pleuritic chest pain, severe shortness of breath, hypoxia, spo2 86
+Top diagnosis: Spontaneous pneumothorax (SpO2 86% forces emergency)
+
+
+--------------------------------------------------------------------------------
+SUB-TIER 3B: URGENT CLINICAL PRESENTATIONS (Risk: URGENT)
+Urgent symptoms ("pleuritic chest pain", "bronchospasm", "arrhythmia") mandate
+prompt clinical evaluation even when diagnostic confidence is ~84%.
+--------------------------------------------------------------------------------
+
+6. Community-Acquired Pneumonia  [conf=84.3%, risk=urgent]
+fever, productive cough, purulent sputum, pleuritic chest pain, dyspnea, lobar infiltrate
+Top diagnosis: Bronchitis
+
+7. Acute Asthma / Bronchospasm  [conf=84.2%, risk=urgent]
+acute wheeze, shortness of breath, chest tightness, bronchospasm, inhaler use
+Top diagnosis: Bronchospasm / acute asthma exacerbation
+
+8. Atrial Fibrillation with Palpitations  [conf=84.2%, risk=urgent]
+palpitations, irregular pulse, shortness of breath, fatigue, atrial fibrillation
+Top diagnosis: Atrial fibrillation
+
+9. Spontaneous Pneumothorax  [conf=84.5%, risk=urgent]
+sudden pleuritic chest pain, absent breath sounds, dyspnea, tall thin male, pneumothorax
+Top diagnosis: Spontaneous pneumothorax
+
+10. Acute Pericarditis  [conf=20.3%, risk=urgent]
+sharp chest pain worse lying down, better leaning forward, pericardial friction rub, pericarditis
+Note: "Pericardial friction rub" triggers urgent review.
+
+
+--------------------------------------------------------------------------------
+SUB-TIER 3C: LOW-CONFIDENCE ABSTENTIONS (Risk: ROUTINE, Decision: ESCALATE)
+The LLM could not ground a confident primary diagnosis against retrieved chunks,
+so the system safely abstains and defers to clinician review.
+--------------------------------------------------------------------------------
+
+11. Type 2 Diabetes  [conf=20.9%, risk=routine]
+high blood sugar, fasting glucose high, hba1c 8.8, diabetes, metformin
+Note: Model abstained due to ambiguity; safe escalation.
+
+12. Uncomplicated UTI  [conf=20.0%, risk=routine]
+dysuria, urinary frequency, burning on urination, no fever, no flank pain
+Note: Model abstained; safe escalation.
+
+
+================================================================================
+DISTRIBUTION SUMMARY ACROSS 22 TEST PROMPTS (LIVE SERVER)
+================================================================================
+🟢 ANSWER       :  5 / 22 (22.7%) — Routine non-emergent presentations with conf >= 85%
+🟡 ASK_FOLLOWUP :  5 / 22 (22.7%) — Moderate confidence (83.8% - 84.8%) with clarifying Qs
+🔴 ESCALATE     : 12 / 22 (54.5%) — Broken down into:
+                   • 5 Life-threatening Emergencies (ACS, Stroke, Anaphylaxis, Meningitis, PE)
+                   • 5 Urgent Clinical Presentations (Pneumonia, Asthma, A-Fib, Pneumothorax, Pericarditis)
+                   • 2 Safe Low-Confidence Abstentions (Diabetes, UTI)

@@ -1,22 +1,25 @@
 """NLI-based claim verification and hallucination detection.
 
-Supports multiple modes:
-* A lightweight, dependency-free lexical/NLI-sim surrogate (usable in CI and
-  without GPU). It scores each claim against the retrieved evidence using
-  token-overlap and per-source trust, producing a deterministic "supported"
-  decision.
-* A real DeBERTa-v3-MNLI entailment model (lazy-loaded) for Kaggle T4 runs.
-* Lexical fallback for local dev (zero VRAM, deterministic).
+Uses the hardened claims module with:
+- Negation-aware lexical NLI (for CI/smoke tests only)
+- DeBERTa-v3-large-MNLI (for headline results; raises on load failure)
+- Explicit contradiction tracking and verifiability reporting
 """
-
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from ..config import detect_hardware
+from ..config import detect_hardware, get_app_config
 from ..models import ClinicalResponse, EvidenceChunk
+from .claims import (
+    split_claims,
+    verify_claims,
+    lexical_nli,
+    DeBERTaNLI,
+    DeBERTaNLISelector,
+    VerificationReport,
+)
 
 
 @dataclass
@@ -30,244 +33,119 @@ class ClaimCheck:
 
 @dataclass
 class VerificationResult:
+    """Backward-compatible result format."""
     total_claims: int
     supported_claims: int
     hallucination_score: float
     checks: list[ClaimCheck] = field(default_factory=list)
+    # New fields from hardening
+    contradicted_claims: int = 0
+    neutral_claims: int = 0
+    contradiction_rate: float = 0.0
+    verifiable: bool = True
+    verifier: str = "unknown"
 
 
-def _split_claims(reasoning: str) -> list[str]:
-    """Split the LLM reasoning text into atomic claims (sentence-level)."""
-    text = reasoning.strip()
-    if not text:
-        return []
-    sentences = re.split(r"(?<=[.!?])\s+|\n", text)
-    cleaned: list[str] = []
-    for s in sentences:
-        s = s.strip()
-        s = re.sub(r"^-\s*", "", s)
-        s = re.sub(r"^\(?\d+\)?\s*", "", s)
-        if len(s) > 15:
-            cleaned.append(s)
-    return cleaned
-
-
-_STOPWORDS = frozenset(
-    "a an the and or of to in on for with at by from is are was were be been being this that those "
-    "as if then than but not no nor so such into out over under up down off again further here there all any "
-    "both each few more most other some only own same its it s t can will shall may might must should would could"
-    .split()
-)
-
-# Clinical phrasing scaffolding: low-informative words that appear in almost every
-# generated claim but carry no verifiable medical content.
-_CLAIM_STOPWORDS = _STOPWORDS | frozenset(
-    "patient presentation consistent diagnosis differential alternative likely based "
-    "supporting evidence supported most strongly indicated appears suggesting suggest "
-    "recommended recommend possible probable potentially"
-    .split()
-)
-
-# Phrases indicating appropriate abstention/uncertainty - should not be penalized as hallucination
-_ABSTENTION_PHRASES = frozenset([
-    "insufficient evidence", "cannot determine", "unable to diagnose",
-    "clinician review", "escalate", "no confident diagnosis",
-    "insufficient to determine", "no supported diagnosis",
-    "evidence does not support", "query-anchored diagnosis",
-    "possible conditions considered", "alternative differential"
-])
-
-def _is_abstention_claim(claim: str) -> bool:
-    """Check if a claim is an appropriate abstention/uncertainty statement."""
-    claim_lower = claim.lower()
-    return any(phrase in claim_lower for phrase in _ABSTENTION_PHRASES)
+def _report_to_result(report: VerificationReport, evidence: Sequence[EvidenceChunk] | None = None) -> VerificationResult:
+    """Convert new VerificationReport to backward-compatible VerificationResult."""
+    checks = []
+    # We don't have per-claim detail in the new report, so create minimal checks
+    # In a full implementation, verify_claims would return per-claim details
+    return VerificationResult(
+        total_claims=report.n_claims,
+        supported_claims=report.supported,
+        hallucination_score=report.hallucination_score,
+        checks=checks,
+        contradicted_claims=report.contradicted,
+        neutral_claims=report.neutral,
+        contradiction_rate=report.contradiction_rate,
+        verifiable=report.verifiable,
+        verifier=report.verifier,
+    )
 
 
 class LexicalVerifier:
-    """Dependency-free claim->evidence scorer (surrogate for NLI)."""
+    """Dependency-free claim->evidence scorer (surrogate for NLI). Uses hardened lexical_nli."""
 
-    def __init__(self, entailment_threshold: float = 0.26, similarity_threshold: float = 0.40):
+    def __init__(self, entailment_threshold: float = 0.26, contra_threshold: float = 0.26):
         self.entailment_threshold = entailment_threshold
-        self.similarity_threshold = similarity_threshold
-
-    @staticmethod
-    def _tokens(text: str, filtering: frozenset = _STOPWORDS) -> set[str]:
-        toks = set(re.findall(r"[a-z]+(?:'[a-z]+)*", text.lower()))
-        return {t for t in toks if t not in filtering}
-
-    @staticmethod
-    def _jaccard(a: set[str], b: set[str]) -> float:
-        if not a or not b:
-            return 0.0
-        return len(a & b) / len(a | b)
+        self.contra_threshold = contra_threshold
 
     def verify(self, reasoning: str, evidence: Sequence[EvidenceChunk]) -> VerificationResult:
-        claims = _split_claims(reasoning)
-        checks: list[ClaimCheck] = []
-
-        for claim in claims:
-            # Skip abstention/uncertainty claims - these are appropriate and should not be penalized
-            if _is_abstention_claim(claim):
-                continue
-
-            claim_tokens = self._tokens(claim, _CLAIM_STOPWORDS)
-            best_score = 0.0
-            best_chunk: EvidenceChunk | None = None
-            for ch in evidence:
-                overlap = len(claim_tokens & self._tokens(ch.text))
-                recall = overlap / max(len(claim_tokens), 1)
-                jacc = self._jaccard(claim_tokens, self._tokens(ch.text))
-                score = 0.8 * recall + 0.2 * jacc
-                if score > best_score:
-                    best_score = score
-                    best_chunk = ch
-
-            supported = best_score >= self.entailment_threshold
-            checks.append(
-                ClaimCheck(
-                    claim=claim,
-                    supported=supported,
-                    entailment_score=round(best_score, 4),
-                    supporting_chunk=(best_chunk.text[:200] if best_chunk else None),
-                    source=(best_chunk.source if best_chunk else None),
-                )
-            )
-
-        supported_count = sum(1 for c in checks if c.supported)
-        total = len(checks)
-        hallucination_score = (1 - supported_count / total) if total else 0.0
-
-        return VerificationResult(
-            total_claims=total,
-            supported_claims=supported_count,
-            hallucination_score=hallucination_score,
-            checks=checks,
+        claims = split_claims(reasoning)
+        evidence_texts = [f"{c.title}: {c.text}" if getattr(c, "title", None) else c.text for c in evidence] if evidence else [""]
+        report = verify_claims(
+            claims,
+            evidence_texts,
+            lexical_nli,
+            self.entailment_threshold,
+            self.contra_threshold,
+            verifier_name="lexical"
         )
+        return _report_to_result(report, evidence)
 
 
 class DeBERTaVerifier:
-    """Real NLI entailment verifier (DeBERTa-v3-large-MNLI, lazy-loaded).
-
-    Uses direct PyTorch batched inference on GPU 1 (multi-GPU) or GPU 0,
-    avoiding accelerate hook deadlocks and speeding up evaluation by ~20x.
-    """
+    """Real NLI entailment verifier (DeBERTa-v3-large-MNLI). Raises on load failure."""
 
     def __init__(
         self,
         model_name: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-        threshold: float = 0.7,
-        device: str | None = "cpu",
+        entailment_threshold: float = 0.5,
+        contra_threshold: float = 0.6,
+        device: str | None = None,
+        use_sentence_selection: bool = True,
     ):
         self.model_name = model_name
-        self.threshold = threshold
-        self.device_pref = device or "cpu"
-        self._model = None
-        self._tokenizer = None
-        self._device = None
-        self._entailment_idx = 0
+        self.entailment_threshold = entailment_threshold
+        self.contra_threshold = contra_threshold
+        self.device = device or ("cuda" if detect_hardware().get("device") == "cuda" else "cpu")
+        self._nli = None
+        self.use_sentence_selection = use_sentence_selection
 
     def _load(self):
-        import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-        target_device = self.device_pref
-        if not target_device:
-            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-                target_device = "cuda:1"
-            else:
-                target_device = "cpu"
-
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self._model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.float16 if "cuda" in target_device else torch.float32,
-            low_cpu_mem_usage=True,
-        ).to(target_device)
-        self._model.eval()
-        self._device = target_device
-
-        # Find entailment label index from model config
-        label2id = {str(k).lower(): v for k, v in getattr(self._model.config, "label2id", {}).items()}
-        self._entailment_idx = label2id.get("entailment", label2id.get("entailed", 0))
-
+        """Load the DeBERTa NLI model. Raises on failure - no silent fallback."""
+        if self.use_sentence_selection:
+            self._nli = DeBERTaNLISelector(model_name=self.model_name, device=self.device)
+        else:
+            self._nli = DeBERTaNLI(model_name=self.model_name, device=self.device)
 
     def verify(self, reasoning: str, evidence: Sequence[EvidenceChunk]) -> VerificationResult:
-        if self._model is None:
+        if self._nli is None:
             self._load()
-        claims = _split_claims(reasoning)
-        if not claims:
-            return VerificationResult(total_claims=0, supported_claims=0, hallucination_score=0.0, checks=[])
-        if not evidence:
-            return VerificationResult(
-                total_claims=len(claims),
-                supported_claims=0,
-                hallucination_score=1.0,
-                checks=[ClaimCheck(claim=c, supported=False, entailment_score=0.0) for c in claims],
-            )
-
-        import torch
-        checks: list[ClaimCheck] = []
-
-        for claim in claims:
-            best_score = 0.0
-            best_chunk: EvidenceChunk | None = None
-
-            # Batch encode (premise, hypothesis) pairs across all evidence chunks
-            premises = [ch.text[:400] for ch in evidence]
-            hypotheses = [claim] * len(premises)
-
-            with torch.no_grad():
-                inputs = self._tokenizer(
-                    premises,
-                    hypotheses,
-                    padding=True,
-                    truncation=True,
-                    max_length=256,
-                    return_tensors="pt",
-                ).to(self._device)
-                logits = self._model(**inputs).logits
-                probs = torch.softmax(logits, dim=-1)
-                ent_scores = probs[:, self._entailment_idx].tolist()
-
-            for score, ch in zip(ent_scores, evidence, strict=False):
-                if score > best_score:
-                    best_score = float(score)
-                    best_chunk = ch
-
-            supported = best_score >= self.threshold
-            checks.append(
-                ClaimCheck(
-                    claim=claim,
-                    supported=supported,
-                    entailment_score=round(best_score, 4),
-                    supporting_chunk=(best_chunk.text[:200] if best_chunk else None),
-                    source=(best_chunk.source if best_chunk else None),
-                )
-            )
-
-        supported_count = sum(1 for c in checks if c.supported)
-        total = len(checks)
-        hallucination_score = (1 - supported_count / total) if total else 0.0
-
-        return VerificationResult(
-            total_claims=total,
-            supported_claims=supported_count,
-            hallucination_score=hallucination_score,
-            checks=checks,
+        claims = split_claims(reasoning)
+        evidence_texts = [f"{c.title}: {c.text}" if getattr(c, "title", None) else c.text for c in evidence] if evidence else [""]
+        report = verify_claims(
+            claims,
+            evidence_texts,
+            self._nli,
+            self.entailment_threshold,
+            self.contra_threshold,
+            verifier_name=f"deberta:{self.model_name}"
         )
+        return _report_to_result(report, evidence)
 
 
 class VerifierFactory:
-    """Factory that routes to the appropriate verifier based on hardware."""
+    """Factory that routes to the appropriate verifier based on config (not hardware)."""
 
     @staticmethod
     def get_verifier() -> object:
-        hw = detect_hardware()
-        # Use DeBERTa on any CUDA device (including 6 GB VRAM).
-        # DeBERTa-v3-large in fp16 occupies ~1.4 GB VRAM — safe on RTX 4050
-        # when the LLM is unloaded between steps.
-        if hw.get("device") == "cuda":
+        cfg = get_app_config()
+        strict_mode = getattr(cfg.security, 'strict_mode', False) if hasattr(cfg, 'security') else False
+        backend = "deberta"  # Default to deberta for experiments
+        
+        if hasattr(cfg, 'verification'):
+            if isinstance(cfg.verification, dict):
+                backend = cfg.verification.get("backend", "deberta")
+            else:
+                backend = getattr(cfg.verification, 'backend', "deberta")
+        
+        if backend == "deberta":
             return DeBERTaVerifier()
+        
+        if strict_mode:
+            raise RuntimeError("Strict mode: lexical verifier not allowed. Set verification.backend=deberta")
         return LexicalVerifier()
 
 
@@ -283,9 +161,25 @@ def verify_response(
 
 def make_verifier(prefer_real: bool = False, model_name: str | None = None) -> object:
     """Factory that creates DeBERTaVerifier when prefer_real=True, or LexicalVerifier."""
+    cfg = get_app_config()
+    strict_mode = getattr(cfg.security, 'strict_mode', False) if hasattr(cfg, 'security') else False
+    allow_fallback = not strict_mode
+    
+    if hasattr(cfg, 'verification'):
+        if isinstance(cfg.verification, dict):
+            allow_fallback = cfg.verification.get("allow_fallback", allow_fallback)
+        else:
+            allow_fallback = getattr(cfg.verification, 'allow_fallback', allow_fallback)
+    
     if prefer_real:
         if model_name:
             return DeBERTaVerifier(model_name=model_name)
-        return DeBERTaVerifier()
+        try:
+            return DeBERTaVerifier()
+        except Exception:
+            if allow_fallback:
+                return LexicalVerifier()
+            raise
+    
+    # For mock/non-real mode, always use LexicalVerifier (fast, no model loading)
     return LexicalVerifier()
-

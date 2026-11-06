@@ -1,0 +1,26 @@
+# Merge these keys into configs/seeds.yaml (or load alongside it).
+aeb:
+  initial_k: 3
+  step_k: 3
+  max_k: 15
+  min_steps: 2            # NEW: never stop on round 1
+  patience: 2             # NEW: threshold must hold for 2 consecutive rounds
+  max_contradiction_rate: 0.10   # NEW: verification gate
+  reformulate_query: true # NEW
+verification:
+  backend: deberta        # headline results must use deberta; lexical = CI smoke test only
+  entail_thr: 0.70        # tune on labelled data
+  contra_thr: 0.70
+  allow_fallback: false   # fail loudly instead of silently using lexical
+retrieval:
+  boost_alpha: 0.2
+  boost_beta: 0.2
+triage:
+  high_confidence: 0.85
+  low_confidence: 0.70
+  cantmiss_emergency_prob: 0.20
+  cantmiss_urgent_prob: 0.05
+security:
+  upload_requires_role: admin
+  rate_limit_analyze: [30, 60]      # calls, seconds
+  external_inference_allowed: false # blocks HFInferenceReasoner unless data is synthetic

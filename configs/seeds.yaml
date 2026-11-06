@@ -24,8 +24,8 @@ retrieval:
 
 verification:
   nli_model: "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
-  entailment_threshold: 0.7
-  similarity_threshold: 0.75
+  entailment_threshold: 0.50
+  similarity_threshold: 0.60
 
 calibration:
   method: "temperature_scaling"
@@ -38,21 +38,27 @@ triage:
   urgent_confidence: 0.70    # Confidence < this -> URGENT + ESCALATE
   routine_confidence: 0.85   # Confidence < this -> ROUTINE + ASK_FOLLOWUP
   home_care_confidence: 0.85 # Confidence >= this -> HOME_CARE + ANSWER
+  
+  # New severity-aware triage parameters (used by triage.py)
+  high_confidence: 0.85
+  low_confidence: 0.70
+  cantmiss_emergency_prob: 0.20  # p >= this for emergent dx -> EMERGENCY
+  cantmiss_urgent_prob: 0.05     # p >= this for any can't-miss dx -> >= URGENT
+  low_confidence_risk: "ROUTINE" # Acuity when only confidence is low
 
 llm:
-  # m42-health/Llama3-Med42-8B: medical 8B, fits 6GB VRAM at 4-bit NF4 (~5.5GB)
-  model_name: "m42-health/Llama3-Med42-8B"
-  serving_backend: "local_4bit"
-  load_in_4bit: true
-  bnb_double_quant: true
+  # microsoft/Phi-3.5-mini-instruct: 3.8B parameters, fits comfortably in VRAM, 4x faster execution
+  model_name: "microsoft/Phi-3.5-mini-instruct"
+  serving_backend: "kaggle_fp16"
+  load_in_4bit: false
+  bnb_double_quant: false
   max_new_tokens: 256
   temperature: 0.1
   top_p: 0.95
 
 ragas_judge:
-  # Use same model family for RAGAS judging
-  model_name: "m42-health/Llama3-Med42-8B"
-
+  # Fast judge for evaluation
+  model_name: "microsoft/Phi-3.5-mini-instruct"
 
 embedding:
   # bge-small-en-v1.5: 90 MB, 384-dim, runs fast on CPU — keeps VRAM free for
@@ -60,3 +66,11 @@ embedding:
   model_name: "BAAI/bge-small-en-v1.5"
   chunk_size: 512
   chunk_overlap: 100
+
+# Hardening security parameters
+security:
+  upload_requires_role: "admin"
+  rate_limit_analyze: [30, 60]      # calls, seconds
+  rate_limit_eval: [2, 3600]        # calls, seconds
+  external_inference_allowed: false # Blocks HFInferenceReasoner unless data is synthetic
+  strict_mode: false                # CAAR_STRICT=1: fail loudly on any fallback

@@ -60,6 +60,8 @@ class QueryHistoryResponse(BaseModel):
     differential: list[dict] | None
     evidence: list[dict] | None
     reasoning: str | None
+    followup_questions: list[str] | None = None
+    triage_reasons: list[str] | None = None
     patient_age: int | None
     patient_gender: str | None
     patient_comorbidities: list[str] | None

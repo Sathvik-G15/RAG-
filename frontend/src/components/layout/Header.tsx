@@ -1,13 +1,8 @@
 import { NavLink } from 'react-router-dom';
-import { clsx } from 'clsx';
 import { useThemeContext } from '../../contexts/ThemeProvider';
-import { useAuthContext } from '../../contexts/AuthProvider';
-import { Button } from '../ui/Button';
-import { Sun, Moon, Monitor, LogOut } from 'lucide-react';
-
-const navigation = [
-  { name: 'Patient', href: '/' },
-] as const;
+import { 
+  Sun, Moon, Monitor, HeartPulse
+} from 'lucide-react';
 
 function ThemeToggle() {
   const { theme, setTheme } = useThemeContext();
@@ -35,75 +30,54 @@ function ThemeToggle() {
 }
 
 export function Header() {
-  const { isAuthenticated, user, logout } = useAuthContext();
-
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-medical-neutral-200 dark:border-medical-neutral-700 bg-white/80 dark:bg-medical-neutral-900/80 backdrop-blur-sm">
+    <header className="sticky top-0 z-40 w-full border-b border-medical-neutral-200 dark:border-medical-neutral-800 bg-white/95 dark:bg-medical-neutral-900/95 backdrop-blur-md shadow-sm">
       <div className="container-page">
         <div className="flex h-16 items-center justify-between gap-4">
-          {/* Logo */}
+          {/* Logo & Brand */}
           <NavLink
             to="/"
-            className="flex items-center gap-2 text-xl font-bold text-medical-primary-600 dark:text-medical-primary-400 shrink-0"
+            className="flex items-center gap-3 text-xl font-bold text-medical-primary-600 dark:text-medical-primary-400 shrink-0 group"
             aria-label="CAAR-CDSS Home"
           >
-            <svg
-              className="h-8 w-8"
-              viewBox="0 0 32 32"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-              aria-hidden="true"
-            >
-              <rect width="32" height="32" rx="8" className="fill-medical-primary-600" />
-              <path
-                d="M8 16L14 22L24 10"
-                stroke="white"
-                strokeWidth="3"
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-medical-primary-500 to-medical-primary-700 text-white shadow-md shadow-medical-primary-500/20 group-hover:scale-105 transition-transform">
+              <svg
+                className="h-6 w-6"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-              />
-            </svg>
-            <span className="hidden sm:inline">CAAR-CDSS</span>
+                aria-hidden="true"
+              >
+                <path d="M12 2v20M2 12h20M7 7l10 10M17 7L7 17" />
+              </svg>
+            </div>
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold tracking-tight text-medical-neutral-900 dark:text-medical-neutral-100 text-lg">
+                  CAAR<span className="text-medical-primary-600 dark:text-medical-primary-400">-CDSS</span>
+                </span>
+                <span className="inline-flex items-center rounded-full bg-emerald-100 dark:bg-emerald-950/60 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse mr-1.5" />
+                  Live 18.5k Guidelines
+                </span>
+              </div>
+              <span className="text-[11px] text-medical-neutral-500 dark:text-medical-neutral-400 font-medium">
+                Patient Symptom Checker & Clinical Decision Support
+              </span>
+            </div>
           </NavLink>
 
-          {/* Nav */}
-          <nav className="flex items-center gap-1 overflow-x-auto" aria-label="Main navigation">
-            {navigation.map((item) => (
-              <NavLink
-                key={item.name}
-                to={item.href}
-                end={item.href === '/'}
-                className={({ isActive }) =>
-                  clsx(
-                    'px-3 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap',
-                    isActive
-                      ? 'bg-medical-primary-50 dark:bg-medical-primary-900/30 text-medical-primary-700 dark:text-medical-primary-300'
-                      : 'text-medical-neutral-600 dark:text-medical-neutral-400 hover:text-medical-neutral-900 dark:hover:text-medical-neutral-100 hover:bg-medical-neutral-100 dark:hover:bg-medical-neutral-800'
-                  )
-                }
-              >
-                {item.name}
-              </NavLink>
-            ))}
-          </nav>
+          {/* Right actions: Portal Badge + Theme Toggle */}
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-medical-primary-50 dark:bg-medical-primary-950/50 border border-medical-primary-200 dark:border-medical-primary-800 text-xs font-medium text-medical-primary-700 dark:text-medical-primary-300">
+              <HeartPulse className="h-3.5 w-3.5 text-medical-primary-600 dark:text-medical-primary-400" />
+              <span>Patient Portal Active</span>
+            </div>
 
-          {/* Right actions */}
-          <div className="flex items-center gap-2 shrink-0">
             <ThemeToggle />
-
-            {isAuthenticated && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={logout}
-                title={`Sign out${user ? ` (${user.username})` : ''}`}
-                aria-label="Sign out"
-                className="hidden sm:flex"
-              >
-                <LogOut className="h-4 w-4" />
-                <span className="hidden md:inline">Sign out</span>
-              </Button>
-            )}
           </div>
         </div>
       </div>

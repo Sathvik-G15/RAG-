@@ -14,7 +14,10 @@ import re
 
 from ..models import PatientProfile, Visit
 
-_AGE_RE = re.compile(r"(\d{1,3})\s*[-\s]?year[-\s]old", re.IGNORECASE)
+_AGE_RE = re.compile(
+    r"\b(\d{1,3})\s*[- ]?\s*(?:year[s]?[- ]?old|y/?o|yo)\b|\baged?\s+(\d{1,3})\b",
+    re.IGNORECASE
+)
 _GENDER_M = re.compile(r"\b(male|man|gentleman|he|him|his)\b", re.IGNORECASE)
 _GENDER_F = re.compile(r"\b(female|woman|lady|she|her)\b", re.IGNORECASE)
 
@@ -37,7 +40,10 @@ def infer_profile(query: str, explicit: PatientProfile | None = None) -> Patient
     if age is None:
         m = _AGE_RE.search(text)
         if m:
-            age = max(0, min(120, int(m.group(1))))
+            # Group 1: year-old format, Group 2: aged format
+            age_str = m.group(1) or m.group(2)
+            if age_str:
+                age = max(0, min(120, int(age_str)))
 
     gender: str | None = explicit.gender
     if gender is None:
@@ -46,13 +52,16 @@ def infer_profile(query: str, explicit: PatientProfile | None = None) -> Patient
         elif _GENDER_M.search(text):
             gender = "male"
 
+    # Use negation check for comorbidities and pregnancy (from triage)
+    from ..confidence.triage import _phrase_present
+    
     comorbid = set(explicit.comorbidities)
     for tk in _COMORBIDITY_TOKENS:
-        if tk in text and tk not in comorbid:
+        if _phrase_present(text, tk) and tk not in comorbid:
             comorbid.add(tk)
 
     pregnancy = explicit.pregnancy_status
-    if pregnancy is None and "pregnan" in text:
+    if pregnancy is None and _phrase_present(text, "pregnan"):
         pregnancy = True
 
     return PatientProfile(

@@ -3,14 +3,15 @@
 Features:
 * Reciprocal Rank Fusion (RRF) merges dense and sparse rankings robustly without
   requiring their score scales to match.
-* Optional guideline-priority boosting: chunks from high-trust sources
-  (e.g., WHO/CDC/NICE/NIH) get an additive boost.
-* Optional patient-specific boosting: geriatric / pediatric / renal implications.
+* Bounded, normalized boosting: RRF scores normalized to [0,1], then multiplicative
+  trust and patient boosts with bounded factors.
+* Optional cross-encoder re-ranking.
+* Rank displacement measurement for ablation studies.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from ..kb.embedder import BaseEmbedder
 from ..kb.vector_store import BaseVectorStore
@@ -18,6 +19,7 @@ from ..models import EvidenceChunk, PatientProfile, Visit
 from .dense import dense_retrieve
 from .rerank import BaseReranker
 from .sparse import BM25Index
+from .boosting import boost_and_rerank, rank_displacement
 
 
 @dataclass
@@ -26,8 +28,9 @@ class HybridConfig:
     sparse_top_k: int = 50
     final_top_k: int = 10
     rrf_k: int = 60
-    alpha_trust: float = 0.10
-    alpha_patient: float = 0.05
+    # Boosting parameters (from hardening.yaml)
+    boost_alpha: float = 0.2   # trust boost strength
+    boost_beta: float = 0.2    # patient match boost strength
 
 
 class HybridRetriever:
@@ -45,6 +48,7 @@ class HybridRetriever:
         self.reranker = reranker
         self.config = config or HybridConfig()
         self._indexed_in_bm25 = 0
+        self._last_rank_displacement: float = 0.0
 
     def ensure_bm25_indexed(self) -> None:
         """Lazily index the vector store's chunks into BM25 (for cold-start)."""
@@ -70,36 +74,13 @@ class HybridRetriever:
             terms.update({"pregnancy", "pregnant", "obstetric", "fetal"})
         return terms
 
-    def _apply_boosting(
-        self,
-        query: str,
-        ranked: list[tuple[EvidenceChunk, float]],
-        patient: PatientProfile | None,
-    ) -> list[tuple[EvidenceChunk, float]]:
-        """Multiplicative boosting by source trust + patient-context token overlap.
-
-        Multiplicative (not additive) is important: RRF base scores are small
-        (~0.03), so an additive boost would dwarf relevance and reorder results
-        by source trust. Multiplying preserves RRF order while tilting toward
-        trusted sources and patient-relevant content.
-        """
-        patient_terms = self._patient_query_terms(patient)
-
-        boosted: list[tuple[EvidenceChunk, float]] = []
-        for ch, base in ranked:
-            trust = ch.trust_score
-            patient_match = 0.0
-            if patient_terms:
-                ch_text = (ch.text + " " + (ch.title or "")).lower()
-                overlap = sum(1 for t in patient_terms if t in ch_text)
-                patient_match = overlap / max(len(patient_terms), 1)
-
-            trust_factor = 1.0 + self.config.alpha_trust * trust
-            patient_factor = 1.0 + self.config.alpha_patient * patient_match
-            new_score = base * trust_factor * patient_factor
-            boosted.append((ch, float(new_score)))
-        boosted.sort(key=lambda x: x[1], reverse=True)
-        return boosted
+    def _compute_patient_match(self, chunk: EvidenceChunk, patient_terms: set[str]) -> float:
+        """Compute patient match score (0-1) for a chunk."""
+        if not patient_terms:
+            return 0.0
+        ch_text = (chunk.text + " " + (chunk.title or "")).lower()
+        overlap = sum(1 for t in patient_terms if t in ch_text)
+        return overlap / max(len(patient_terms), 1)
 
     def retrieve(
         self,
@@ -109,7 +90,18 @@ class HybridRetriever:
         patient_context_str: str | None = None,
         top_k: int | None = None,
     ) -> list[EvidenceChunk]:
-        """Retrieve evidence chunks using the hybrid pipeline."""
+        """Retrieve evidence chunks using the hybrid pipeline with bounded boosting.
+        
+        Retrieval Order (important for ablation):
+        1. Dense retrieval (biomedical embeddings) -> top dense_top_k
+        2. Sparse retrieval (BM25) -> top sparse_top_k  
+        3. Reciprocal Rank Fusion (RRF) merges dense + sparse
+        4. Bounded boosting: RRF scores normalized to [0,1], then multiplicative
+           trust_score (alpha) and patient_match (beta) boosts
+        5. Cross-encoder re-ranking (if reranker provided) on boosted top candidates
+           NOTE: Reranker runs AFTER boosting, so it can override boost ordering.
+               For ablation: compare with/without reranker and with/without boosting.
+        """
         effective_query = patient_context_str or query
         top_k = top_k or self.config.final_top_k
 
@@ -126,11 +118,37 @@ class HybridRetriever:
         # Carry dense similarity signal onto chunks for downstream confidence.
         dense_sim: dict[str, float] = {str(c.chunk_id): s for c, s in dense_idx}
 
+        # RRF fusion
         fused = self._rrf(dense_idx, sparse_idx)
-        boosted = self._apply_boosting(query, fused, patient)
+
+        # Prepare chunks for bounded boosting
+        patient_terms = self._patient_query_terms(patient)
+        boost_input = []
+        for ch, rrf_score in fused:
+            boost_input.append({
+                "chunk": ch,
+                "rrf_score": rrf_score,
+                "trust_score": ch.trust_score,
+                "patient_match": self._compute_patient_match(ch, patient_terms),
+            })
+
+        # Apply bounded, normalized boosting
+        boosted = boost_and_rerank(
+            boost_input,
+            alpha=self.config.boost_alpha,
+            beta=self.config.boost_beta,
+        )
+
+        # Track rank displacement for ablation
+        before_ids = [str(c["chunk"].chunk_id) for c in boost_input]
+        after_ids = [str(c["chunk"].chunk_id) for c in boosted]
+        self._last_rank_displacement = rank_displacement(before_ids, after_ids)
+
+        # Convert back to (chunk, score) format
+        boosted_pairs = [(c["chunk"], c["final_score"]) for c in boosted]
 
         if self.reranker is not None:
-            chunks_only = [c for c, _ in boosted[: max(top_k * 3, top_k)]]
+            chunks_only = [c for c, _ in boosted_pairs[: max(top_k * 3, top_k)]]
             reranked = self.reranker.rerank(query, chunks_only, top_k=top_k)
             out: list[EvidenceChunk] = []
             for i, (c, _) in enumerate(reranked):
@@ -140,22 +158,22 @@ class HybridRetriever:
             return out
 
         out = []
-        for i, (c, _) in enumerate(boosted[:top_k]):
+        for i, (c, _) in enumerate(boosted_pairs[:top_k]):
             c.similarity_score = dense_sim.get(str(c.chunk_id), 0.0)
             c.rank = i
             out.append(c)
         return out
+
+    def get_last_rank_displacement(self) -> float:
+        """Return the rank displacement from the last retrieval (for ablation logging)."""
+        return self._last_rank_displacement
 
     def _rrf(
         self,
         dense: list[tuple[EvidenceChunk, float]],
         sparse: list[tuple[EvidenceChunk, float]],
     ) -> list[tuple[EvidenceChunk, float]]:
-        """Reciprocal Rank Fusion over dense and sparse results.
-
-        Combines two document rankings into one fused ranking by
-        score(i) = sum_r 1 / (rrf_k + rank_r(i))
-        """
+        """Reciprocal Rank Fusion over dense and sparse results."""
         k = self.config.rrf_k
         fused: dict[str, float] = {}
         chunks_map: dict[str, EvidenceChunk] = {}

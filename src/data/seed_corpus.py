@@ -397,6 +397,22 @@ SEED_CORPUS = [
             "complicated infection and bacteremia."
         ),
     },
+    {
+        "source": "NICE/headache_guideline",
+        "title": "NICE Guideline: Assessment and Management of Headaches in Over 12s",
+        "year": 2023,
+        "trust_score": 0.93,
+        "text": (
+            "Headaches are classified into primary (tension-type headache, migraine, cluster headache) "
+            "and secondary headaches. Tension-type headache presents with bilateral, pressing or tightening "
+            "band-like headache of mild to moderate intensity, without nausea or vomiting. "
+            "Migraine presents with recurrent moderate to severe headache episodes, typically unilateral and "
+            "throbbing or pulsating, aggravated by routine physical activity, and accompanied by nausea, "
+            "photophobia, or phonophobia. Triptans, NSAIDs, and paracetamol are first-line acute treatments. "
+            "Red flags warranting urgent escalation include sudden onset thunderclap headache, systemic symptoms with fever, "
+            "and new focal neurological deficits."
+        ),
+    },
 ]
 
 

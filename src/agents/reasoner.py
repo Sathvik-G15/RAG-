@@ -31,6 +31,8 @@ _DX_PATTERNS: list[tuple[str, str, float]] = [
     ("gastritis|peptic ulcer|nsaid|h. pylori|helicobacter|epigastric", "gastritis", 0.76),
     ("aki|acute kidney|creatinine|kdigo", "acute_kidney_injury", 0.77),
     ("influenza|flu|oseltamivir", "influenza", 0.80),
+    ("migraine|migraines|throbbing headache|unilateral headache|aura|photophobia", "migraine", 0.78),
+    ("tension headache|tension headaches|headache|headaches|cephalea", "tension_headache", 0.76),
 ]
 
 
@@ -108,9 +110,12 @@ class MockReasoner(BaseReasoner):
                 boost = pyelo_boost if dx == "pyelonephritis" else 1.0
                 raw = prior * specificity * (0.55 + 0.45 * evidence_support) * boost
             else:
-                if evidence_support < 0.35:
+                # Require higher evidence support for non-query-matched patterns
+                # to avoid evidence-only matches overriding query-matched ones
+                if evidence_support < 0.55:
                     continue
-                raw = prior * 0.35 * evidence_support
+                # Don't apply pyelo_boost for evidence-only matches
+                raw = prior * 0.25 * evidence_support
 
             support: list[str] = []
             sources_used: list[str] = []
@@ -549,14 +554,13 @@ class OpenSourceLLMReasoner(BaseReasoner):
 
     def generate(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
         import torch
+        from ..api.security import wrap_evidence
 
         if self._pipe is None:
             self._load()
 
-        evidence_block = "\n\n".join(
-            f"[{i+1}] SOURCE={c.source}; TITLE={c.title or ''}:\n{c.text[:500]}"
-            for i, c in enumerate(evidence)
-        )
+        evidence_texts = [c.text[:500] for c in evidence]
+        evidence_block = wrap_evidence(evidence_texts)
         prompt = (
             "You are a clinical decision support assistant. Provide a structured JSON response.\n"
             "Patient query: " + query + "\n\n"
@@ -565,8 +569,19 @@ class OpenSourceLLMReasoner(BaseReasoner):
             "differential (list of objects with diagnosis, probability, supporting_evidence, sources), reasoning (string)."
         )
 
+        formatted_prompt = prompt
+        if hasattr(self._pipe, "tokenizer") and hasattr(self._pipe.tokenizer, "apply_chat_template"):
+            try:
+                formatted_prompt = self._pipe.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                formatted_prompt = prompt
+
         outputs = self._pipe(
-            prompt,
+            formatted_prompt,
             max_new_tokens=self.max_new_tokens,
             do_sample=True,
             temperature=self.temperature,
@@ -582,7 +597,10 @@ class OpenSourceLLMReasoner(BaseReasoner):
 
 
 class HFInferenceReasoner(BaseReasoner):
-    """Cloud serverless reasoner calling Hugging Face Inference API (0 local VRAM)."""
+    """Cloud serverless reasoner calling Hugging Face Inference API (0 local VRAM).
+
+    Blocked by default unless security.external_inference_allowed=true in config.
+    """
 
     def __init__(
         self,
@@ -591,6 +609,11 @@ class HFInferenceReasoner(BaseReasoner):
         max_new_tokens: int = 256,
         temperature: float = 0.1,
     ):
+        from ..config import get_app_config
+        cfg = get_app_config()
+        if not cfg.security.external_inference_allowed:
+            raise RuntimeError("External inference disabled: patient data must not leave this system. Set security.external_inference_allowed=true in config to enable.")
+
         from huggingface_hub import InferenceClient
 
         self.model_name = model_name
@@ -600,10 +623,9 @@ class HFInferenceReasoner(BaseReasoner):
         self.temperature = temperature
 
     def generate(self, query: str, evidence: Sequence[EvidenceChunk]) -> ClinicalResponse:
-        evidence_block = "\n\n".join(
-            f"[{i+1}] SOURCE={c.source}; TITLE={c.title or ''}:\n{c.text}"
-            for i, c in enumerate(evidence)
-        )
+        from ..api.security import wrap_evidence
+        evidence_texts = [c.text for c in evidence]
+        evidence_block = wrap_evidence(evidence_texts)
         prompt = (
             "You are a clinical decision support assistant. Provide a structured JSON response.\n"
             "Patient query: " + query + "\n\n"

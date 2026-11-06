@@ -109,10 +109,12 @@ class ClinicalResponse(BaseModel):
     hallucination_score: float = 0.0
     risk_level: RiskLevel = RiskLevel.ROUTINE
     decision: TriageDecision = TriageDecision.ANSWER
+    followup_questions: list[str] = Field(default_factory=list)
     evidence: list[EvidenceChunk] = Field(default_factory=list)
     reasoning: str = ""
     retrieval_k_used: int = 0
     escalated_reason: str | None = None
+    triage_reasons: list[str] = Field(default_factory=list)
     safety_disclaimer: str = (
         "This is an AI-assisted analysis for research purposes only. "
         "It does not replace professional medical advice. Always consult a qualified clinician."

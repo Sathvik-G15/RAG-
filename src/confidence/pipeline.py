@@ -1,5 +1,4 @@
 """Pipeline orchestrator: ties KB + retrieval + AEB + verification + triage together."""
-
 from __future__ import annotations
 
 import logging
@@ -7,17 +6,17 @@ from pathlib import Path
 
 from ..agents.context_builder import infer_profile
 from ..agents.reasoner import make_reasoner
-from ..config import get_app_config, set_global_seeds, TriageConfig
+from ..config import get_app_config, set_global_seeds
 from ..kb.embedder import make_embedder
 from ..kb.ingest import KnowledgeBase
 from ..kb.vector_store import make_vector_store
-from ..models import ClinicalResponse, PatientProfile, Visit
+from ..models import ClinicalResponse, PatientProfile, Visit, TriageDecision, RiskLevel
 from ..retrieval.hybrid import HybridConfig, HybridRetriever
 from ..retrieval.rerank import make_reranker
 from ..verification.verifier import make_verifier
 from .aeb import AEBPipeline, AEBResult
 from .estimation import ConfidenceModel
-from .triage import assign_risk
+from .triage import triage, TriageInput, TriageConfig, TriageResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +71,13 @@ class Pipeline:
             verifier=verifier,
             config=cfg.aeb,
         )
+        # Convert triage config from dict to TriageConfig
+        triage_cfg = TriageConfig(**cfg.triage) if isinstance(cfg.triage, dict) else cfg.triage
         return cls(
             kb=kb,
             retriever=retriever,
             aeb=aeb,
-            triage_config=cfg.triage,
+            triage_config=triage_cfg,
             prefer_real_llm=prefer_real,
             model_name=cfg.llm.model_name,
         )
@@ -138,11 +139,12 @@ class Pipeline:
             verifier=verifier,
             config=cfg.aeb,
         )
+        triage_cfg = TriageConfig(**cfg.triage) if isinstance(cfg.triage, dict) else cfg.triage
         return cls(
             kb=kb,
             retriever=retriever,
             aeb=aeb,
-            triage_config=cfg.triage,
+            triage_config=triage_cfg,
             prefer_real_llm=prefer_real,
             model_name=cfg.llm.model_name,
         )
@@ -156,13 +158,57 @@ class Pipeline:
         """Run the full pipeline: profile -> AEB -> triage."""
         if patient is None:
             patient = infer_profile(query)
+        
         aeb_result = self.aeb.run(query, visit=visit, patient=patient)
-        response = assign_risk(
-            aeb_result.response,
-            profile=patient,
-            vitals=visit.vitals if visit else None,
-            query=query,
-            triage_config=self.triage_config,
+        response = aeb_result.response
+        
+        # Build triage input from patient profile and visit
+        vitals = visit.vitals if visit else None
+        triage_input = TriageInput(
+            age_years=patient.age,
+            sbp=vitals.systolic_bp if vitals else None,
+            hr=vitals.heart_rate if vitals else None,
+            spo2=vitals.oxygen_saturation if vitals else None,
+            rr=vitals.respiratory_rate if vitals else None,
+            temp_c=vitals.temperature if vitals else None,
+            avpu=getattr(vitals, 'avpu', None) if vitals else None,
+            pregnant=patient.pregnancy_status,
+            symptom_text=query,
         )
-        return aeb_result, response
+        
+        # Get differential as list of (diagnosis, probability) tuples
+        differential = [(d.diagnosis, d.probability) for d in response.differential]
+        
+        # Run new triage
+        triage_result: TriageResult = triage(
+            triage_input,
+            differential,
+            response.confidence,
+            self.triage_config,
+        )
+        
+        # Update response with triage results
+        if isinstance(triage_result.risk_level, str):
+            try:
+                response.risk_level = RiskLevel(triage_result.risk_level.lower())
+            except ValueError:
+                response.risk_level = RiskLevel.ROUTINE
+        else:
+            response.risk_level = triage_result.risk_level
 
+        if isinstance(triage_result.decision, str):
+            try:
+                response.decision = TriageDecision(triage_result.decision.lower())
+            except ValueError:
+                response.decision = TriageDecision.ESCALATE
+        else:
+            response.decision = triage_result.decision
+
+        response.triage_reasons = triage_result.reasons
+        response.followup_questions = triage_result.followup_questions
+        
+        # Set escalated_reason from triage reasons if triage escalated and AEB didn't set one
+        if triage_result.decision == TriageDecision.ESCALATE and not response.escalated_reason:
+            response.escalated_reason = "; ".join(triage_result.reasons) + " — clinician review advised."
+        
+        return aeb_result, response

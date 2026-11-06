@@ -53,7 +53,6 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (response.status === 401 && !skipAuth) {
     clearAuthToken();
-    window.location.href = '/login';
     throw new ApiError('Unauthorized', 401, null);
   }
 
