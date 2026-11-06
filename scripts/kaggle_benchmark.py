@@ -243,20 +243,32 @@ def main() -> None:
 
     # 5. Check for Chroma DB
     chroma_dir = args.chroma_dir
-    if not chroma_dir:
-        kaggle_chroma = Path("/kaggle/input/caar-cdss-chroma")
-        local_chroma = Path("data/chroma_db")
-        working_chroma = Path("/kaggle/working/chroma_db") if is_kaggle else Path("data/chroma_db")
+    working_chroma = Path("/kaggle/working/chroma_db") if is_kaggle else Path("data/chroma_db")
 
-        if kaggle_chroma.exists():
-            log(f"Using attached ChromaDB from: {kaggle_chroma}")
-            chroma_dir = str(kaggle_chroma)
+    # If chroma_dir explicitly passed or auto-detected in /kaggle/input, copy to writable /kaggle/working
+    if chroma_dir and str(chroma_dir).startswith("/kaggle/input"):
+        log(f"Copying read-only ChromaDB from {chroma_dir} to {working_chroma}...")
+        working_chroma.mkdir(parents=True, exist_ok=True)
+        run_cmd(f"cp -r {chroma_dir}/* {working_chroma}/")
+        chroma_dir = str(working_chroma)
+    elif not chroma_dir:
+        # Search for attached chroma.sqlite3 anywhere in /kaggle/input
+        kaggle_chroma_files = list(Path("/kaggle/input").glob("**/chroma.sqlite3")) if is_kaggle else []
+        local_chroma = Path("data/chroma_db")
+
+        if kaggle_chroma_files:
+            source_dir = kaggle_chroma_files[0].parent
+            log(f"Found attached ChromaDB at: {source_dir}")
+            log(f"Copying to writable directory: {working_chroma}...")
+            working_chroma.mkdir(parents=True, exist_ok=True)
+            run_cmd(f"cp -r {source_dir}/* {working_chroma}/")
+            chroma_dir = str(working_chroma)
+        elif working_chroma.exists() and any(working_chroma.iterdir()):
+            log(f"Using existing working ChromaDB at: {working_chroma}")
+            chroma_dir = str(working_chroma)
         elif local_chroma.exists() and any(local_chroma.iterdir()):
             log(f"Using local ChromaDB at: {local_chroma}")
             chroma_dir = str(local_chroma)
-        elif working_chroma.exists() and any(working_chroma.iterdir()):
-            log(f"Using working ChromaDB at: {working_chroma}")
-            chroma_dir = str(working_chroma)
         else:
             # If no ChromaDB exists and unified KB exists, we can run against unified KB
             unified_kb = Path("data/unified_clinical_kb.jsonl")

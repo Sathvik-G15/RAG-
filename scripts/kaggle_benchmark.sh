@@ -77,13 +77,16 @@ if [ -n "$DATA_INPUT" ]; then
     echo "Copied datasets into data/external/"
 fi
 
-# Check for attached Chroma DB
+# Check for attached Chroma DB (must copy from /kaggle/input to writable /kaggle/working/chroma_db)
 CHROMA_INPUT=$(find /kaggle/input -name "chroma.sqlite3" 2>/dev/null | head -n 1)
 CHROMA_ARG=""
 if [ -n "$CHROMA_INPUT" ]; then
     CHROMA_DIR=$(dirname "$CHROMA_INPUT")
     echo "Found pre-built Chroma DB at: $CHROMA_DIR"
-    CHROMA_ARG="--chroma-dir $CHROMA_DIR"
+    echo "Copying to writable directory /kaggle/working/chroma_db..."
+    mkdir -p /kaggle/working/chroma_db
+    cp -r "$CHROMA_DIR"/* /kaggle/working/chroma_db/
+    CHROMA_ARG="--chroma-dir /kaggle/working/chroma_db"
 elif [ -d "data/chroma_db" ]; then
     echo "Found local Chroma DB at data/chroma_db"
     CHROMA_ARG="--chroma-dir data/chroma_db"

@@ -138,9 +138,31 @@ class ChromaVectorStore(BaseVectorStore):
     """ChromaDB-backed persistent vector store with cosine similarity."""
 
     def __init__(self, persist_dir: str | Path = "data/chroma_db", collection_name: str = "guidelines"):
+        import logging
+        import os
+        import shutil
         import chromadb
 
-        self.persist_dir = Path(persist_dir)
+        p_dir = Path(persist_dir)
+        # Handle read-only filesystems (e.g., Kaggle /kaggle/input where SQLite write/lock fails)
+        is_readonly = str(p_dir).startswith("/kaggle/input")
+        if not is_readonly and p_dir.exists():
+            try:
+                test_file = p_dir / ".write_test"
+                test_file.touch()
+                test_file.unlink()
+            except (OSError, PermissionError):
+                is_readonly = True
+
+        if is_readonly:
+            target_dir = Path("/kaggle/working/chroma_db") if Path("/kaggle/working").exists() else Path("/tmp/chroma_db")
+            if not target_dir.exists() or not any(target_dir.iterdir()):
+                logging.getLogger(__name__).info("Copying read-only ChromaDB from %s to %s...", p_dir, target_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(p_dir, target_dir, dirs_exist_ok=True)
+            p_dir = target_dir
+
+        self.persist_dir = p_dir
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(path=str(self.persist_dir))
         self._collection = self._client.get_or_create_collection(
