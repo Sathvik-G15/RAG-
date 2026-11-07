@@ -14,28 +14,41 @@
 
 set -e
 
-STAGE=${1:-part1}
-N_SAMPLES=${2:-50}
+# Support flexible arguments:
+#   bash scripts/kaggle_benchmark.sh part2 100
+#   bash scripts/kaggle_benchmark.sh "mtsamples ddxplus" 100
+#   bash scripts/kaggle_benchmark.sh mtsamples ddxplus 100
+LAST_ARG="${@: -1}"
+if [[ "$LAST_ARG" =~ ^[0-9]+$ ]] && [ "$#" -gt 1 ]; then
+    N_SAMPLES="$LAST_ARG"
+    BENCHMARKS_INPUT="${@:1:$#-1}"
+else
+    N_SAMPLES="${2:-50}"
+    BENCHMARKS_INPUT="${1:-part1}"
+fi
 
-if [ "$STAGE" = "part1" ]; then
+# Convert to lowercase to avoid case-sensitivity errors in argparse choices
+BENCHMARKS_INPUT=$(echo "$BENCHMARKS_INPUT" | tr '[:upper:]' '[:lower:]')
+
+if [ "$BENCHMARKS_INPUT" = "part1" ]; then
     BENCHMARKS="seeds medqa pubmedqa mmlumed"
     OUT_DIR="kaggle_eval_part1"
-elif [ "$STAGE" = "part2" ]; then
+elif [ "$BENCHMARKS_INPUT" = "part2" ]; then
     BENCHMARKS="ddxplus medmcqa mtsamples"
     OUT_DIR="kaggle_eval_part2"
-elif [ "$STAGE" = "all" ]; then
+elif [ "$BENCHMARKS_INPUT" = "all" ]; then
     BENCHMARKS="seeds medqa pubmedqa mmlumed ddxplus medmcqa mtsamples"
     OUT_DIR="kaggle_eval_all"
 else
-    # Custom benchmarks or single benchmark (e.g. 'seeds' or 'medqa pubmedqa')
-    BENCHMARKS="$STAGE"
-    OUT_DIR="kaggle_eval_${STAGE// /_}"
+    # Custom benchmarks passed directly (e.g. 'mtsamples ddxplus')
+    BENCHMARKS="$BENCHMARKS_INPUT"
+    OUT_DIR="kaggle_eval_${BENCHMARKS// /_}"
 fi
 
 echo "======================================================================"
 echo " CAAR-CDSS: Starting Kaggle Benchmark Run"
 echo " Model:      microsoft/Phi-3.5-mini-instruct (FP16)"
-echo " Stage:      $STAGE"
+echo " Stage/Target: $BENCHMARKS_INPUT"
 echo " Benchmarks: $BENCHMARKS"
 echo " Samples:    N=$N_SAMPLES per benchmark"
 echo " Output:     /kaggle/working/results/$OUT_DIR"
