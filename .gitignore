@@ -184,3 +184,8 @@ paper/*.out
 paper/*.toc
 paper/*.fdb_latexmk
 paper/*.fls
+
+# Kaggle temporary downloads
+kaggle_downloads/
+kaggle_downloads_latest/
+kaggle_downloads_run3/
